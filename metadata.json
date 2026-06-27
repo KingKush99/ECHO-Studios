@@ -1,0 +1,6 @@
+{
+  "name": "ECHO Studios",
+  "description": "A free prompt-to-podcast studio that creates scripts from text prompts and optional image references.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

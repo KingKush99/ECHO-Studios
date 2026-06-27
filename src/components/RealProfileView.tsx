@@ -202,9 +202,9 @@ export function ProfileView({ onHome, generatedPodcasts }: { onHome: () => void;
             <div className="w-24 h-24 sm:w-36 sm:h-36 rounded-full bg-gradient-to-tr from-brand-500 via-pink-500 to-purple-600 p-1">
               <div className="w-full h-full rounded-full bg-[#08091a] border-4 border-[#08091a] overflow-hidden flex items-center justify-center relative">
                 <img src={`https://api.dicebear.com/7.x/bottts/svg?seed=${profile.mascotId}&backgroundColor=111229`} alt={`${profile.displayName} avatar`} className="w-full h-full object-cover" />
-                <Pencil className="absolute bottom-4 right-0 h-6 w-6 translate-x-1/2 scale-x-[-1] text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.85)]" />
               </div>
             </div>
+            <Pencil strokeWidth={3} className="pointer-events-none absolute bottom-5 right-0 z-20 h-7 w-7 translate-x-1/2 scale-x-[-1] text-white drop-shadow-[0_2px_10px_rgba(0,0,0,0.95)] sm:bottom-7 sm:h-8 sm:w-8" />
           </button>
 
           <div className="min-w-0 space-y-4">

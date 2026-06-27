@@ -565,7 +565,6 @@ export default function App() {
       >
         <div className="relative flex items-center justify-center">
           <MessageSquare className="w-6 h-6 scale-x-[-1]" />
-          <span className="absolute -top-2 -right-2 w-3 h-3 bg-red-500 rounded-full border-2 border-[#1a1b36]" />
         </div>
       </button>
 

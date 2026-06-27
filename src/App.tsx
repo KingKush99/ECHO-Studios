@@ -14,6 +14,7 @@ import { PodcastPlayer } from "./components/PodcastPlayer";
 import { SearchView } from "./components/SearchView";
 import { DmChat } from "./components/DmChat";
 import { AiOracleChat } from "./components/AiOracleChat";
+import echoLogoUrl from "./assets/images/echo_studios_favicon_1782358750086.jpg";
 
 type ActiveTab = "create" | "listen" | "publish" | "profile" | "search";
 type SpeechStatus = "idle" | "playing" | "paused";
@@ -592,7 +593,7 @@ export default function App() {
         </div>
 
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full overflow-hidden shadow-[0_0_15px_rgba(139,92,246,0.3)] bg-transparent">
-          <img src="/src/assets/images/echo_studios_favicon_1782358750086.jpg" alt="ECHO Studios Logo" className="w-[115%] h-[115%] max-w-none -ml-[7.5%] -mt-[7.5%] rounded-full object-cover mix-blend-lighten" />
+          <img src={echoLogoUrl} alt="ECHO Studios Logo" className="w-[115%] h-[115%] max-w-none -ml-[7.5%] -mt-[7.5%] rounded-full object-cover mix-blend-lighten" />
         </div>
 
         <div className="flex items-center justify-end gap-3 text-xs font-mono text-brand-200/50 w-1/3">

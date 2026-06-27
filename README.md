@@ -24,3 +24,9 @@ Browser speech is only a fallback and can sound robotic. For better free local v
 For free local voice cloning, install Chatterbox with `.\install-chatterbox.ps1`, upload a voice reference you have permission to use, generate an episode, choose `Local Clone` in the player, then generate an audio sample. This does not require an API key, but it runs on your machine and can be slow without a GPU.
 
 For ElevenLabs-level hosted quality, set `ELEVENLABS_API_KEY` in `.env` or in your Vercel environment variables.
+
+## GitHub Pages
+
+This repo includes a GitHub Actions workflow that builds the Vite app and deploys the static `dist` output to GitHub Pages. In the repository settings, set Pages to deploy from **GitHub Actions**, not from the raw `main` branch.
+
+GitHub Pages is static hosting. It can load the frontend, but it cannot run the Express `/api/*` routes for server-side podcast generation, RSS helpers, live feeds, or neural audio. Use local `npm run dev` or a server host like Vercel for the full app backend.

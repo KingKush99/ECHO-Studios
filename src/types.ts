@@ -55,11 +55,21 @@ export interface PodcastCover {
   createdAt: string;
 }
 
+export interface ResearchSource {
+  title: string;
+  source: string;
+  url: string;
+  summary: string;
+  published?: string;
+  kind?: "encyclopedia" | "paper" | "scholarly-index";
+}
+
 export interface PodcastMetadata {
   title: string;
   tagline: string;
   description: string;
   musicMood: string;
+  episodeFormat?: string;
   speakers: Speaker[];
   chapters: Chapter[];
   script: ScriptLine[];
@@ -67,6 +77,7 @@ export interface PodcastMetadata {
   promptImages?: PromptImage[];
   voiceReferences?: VoiceReference[];
   coverArt?: PodcastCover;
+  researchSources?: ResearchSource[];
 }
 
 export interface PresetTopic {

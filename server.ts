@@ -31,6 +31,7 @@ type PromptImage = {
 };
 
 type VoiceReferenceRequest = {
+  id?: string;
   name?: string;
   mimeType?: string;
   size?: number;
@@ -54,17 +55,33 @@ type LocalPodcastRequest = {
   voiceReferences?: VoiceReferenceRequest[];
 };
 
+type ResearchSource = {
+  title: string;
+  source: string;
+  url: string;
+  summary: string;
+  published?: string;
+  kind?: "encyclopedia" | "paper" | "scholarly-index";
+};
+
 type AudioRequest = {
   script?: Array<{
     speakerName?: string;
     dialogue?: string;
     durationSeconds?: number;
   }>;
+  speakers?: RequestedSpeaker[];
   maxSeconds?: number;
   provider?: "elevenlabs" | "piper" | "chatterbox";
   voiceId?: string;
   modelId?: string;
   voiceReferences?: VoiceReferenceRequest[];
+};
+
+type AudioSegment = {
+  speakerName: string;
+  text: string;
+  durationSeconds: number;
 };
 
 type LivePodcastFeed = {
@@ -142,13 +159,6 @@ const DURATION_TARGET_SECONDS = {
   hour: 3540,
 };
 
-const DURATION_CAP_SECONDS = {
-  short: 150,
-  medium: 360,
-  long: 960,
-  hour: 3600,
-};
-
 const MIN_CUSTOM_DURATION_SECONDS = 60;
 const MAX_CUSTOM_DURATION_SECONDS = 7200;
 
@@ -194,6 +204,8 @@ const PIPER_VOICE_DIR = process.env.PIPER_VOICE_DIR || path.join(LOCAL_TTS_DIR, 
 const CHATTERBOX_DIR = process.env.CHATTERBOX_DIR || path.join(LOCAL_TTS_DIR, "chatterbox");
 const CHATTERBOX_SCRIPT = process.env.CHATTERBOX_SCRIPT || path.join(process.cwd(), "tools", "chatterbox_generate.py");
 const CHATTERBOX_PYTHON = process.env.CHATTERBOX_PYTHON || path.join(CHATTERBOX_DIR, "Scripts", "python.exe");
+const CHATTERBOX_PACKAGE_DIR = path.join(CHATTERBOX_DIR, "Lib", "site-packages", "chatterbox");
+const CHATTERBOX_CACHE_DIR = path.join(LOCAL_TTS_DIR, "model-cache");
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
 const ELEVENLABS_DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
@@ -274,6 +286,27 @@ const LIVE_PODCAST_FEEDS: LivePodcastFeed[] = [
 
 let livePodcastCache: { timestamp: number; podcasts: LivePodcastEpisode[] } | null = null;
 const presetAudioCache = new Map<string, Buffer>();
+const generatedAudioCache = new Map<string, { audio: Buffer; mimeType: string; createdAt: number }>();
+
+function storeGeneratedAudio(audioBase64: string, mimeType: string) {
+  const now = Date.now();
+  for (const [id, entry] of generatedAudioCache) {
+    if (now - entry.createdAt > 60 * 60 * 1000) generatedAudioCache.delete(id);
+  }
+  while (generatedAudioCache.size >= 24) {
+    const oldestId = generatedAudioCache.keys().next().value;
+    if (!oldestId) break;
+    generatedAudioCache.delete(oldestId);
+  }
+
+  const id = randomUUID();
+  generatedAudioCache.set(id, {
+    audio: Buffer.from(audioBase64, "base64"),
+    mimeType,
+    createdAt: now,
+  });
+  return `/api/generated-audio/${id}`;
+}
 
 const PLAYABLE_PRESET_PODCASTS: PlayablePresetPodcast[] = [
   {
@@ -372,7 +405,7 @@ function getAudioEngineStatus() {
   const voices = getAvailablePiperVoices();
   return {
     piperAvailable: fileExists(PIPER_EXE) && voices.length > 0,
-    chatterboxAvailable: fileExists(CHATTERBOX_PYTHON) && fileExists(CHATTERBOX_SCRIPT),
+    chatterboxAvailable: fileExists(CHATTERBOX_PYTHON) && fileExists(CHATTERBOX_SCRIPT) && fileExists(CHATTERBOX_PACKAGE_DIR),
     elevenLabsAvailable: Boolean(ELEVENLABS_API_KEY),
     elevenLabsModelId: ELEVENLABS_MODEL_ID,
     elevenLabsDefaultVoiceId: ELEVENLABS_DEFAULT_VOICE_ID,
@@ -404,6 +437,327 @@ async function getElevenLabsVoices() {
 function shortText(value: string, max = 96): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max - 3).trim()}...`;
+}
+
+function cleanResearchText(value: unknown, fallback = "") {
+  return stripHtml(String(value || fallback))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const RESEARCH_STOPWORDS = new Set([
+  "about",
+  "after",
+  "also",
+  "and",
+  "are",
+  "can",
+  "create",
+  "cover",
+  "episode",
+  "for",
+  "from",
+  "have",
+  "into",
+  "make",
+  "podcast",
+  "show",
+  "talk",
+  "that",
+  "the",
+  "this",
+  "through",
+  "with",
+  "what",
+  "when",
+  "where",
+  "which",
+  "why",
+]);
+
+async function fetchJsonWithTimeout(url: string, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "ECHO Studios research podcast maker (local app)",
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchTextWithTimeout(url: string, timeoutMs = 5500) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "ECHO Studios research podcast maker (local app)",
+        Accept: "application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) return "";
+    return await response.text();
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function getResearchTerms(topic: string) {
+  const seen = new Set<string>();
+  return topic
+    .toLowerCase()
+    .replace(/[^\w\s'-]/g, " ")
+    .split(/\s+/)
+    .map((term) => term.replace(/^['-]+|['-]+$/g, ""))
+    .filter((term) => term.length > 2 && !RESEARCH_STOPWORDS.has(term))
+    .filter((term) => {
+      if (seen.has(term)) return false;
+      seen.add(term);
+      return true;
+    })
+    .slice(0, 10);
+}
+
+function getResearchQuery(topic: string) {
+  const terms = getResearchTerms(topic);
+  return shortText(terms.join(" ") || topic.replace(/\s+/g, " ").trim() || topic, 120);
+}
+
+function getResearchTermVariants(term: string) {
+  const variants = [term];
+  if (term.endsWith("ies") && term.length > 5) variants.push(`${term.slice(0, -3)}y`);
+  if (term.endsWith("s") && term.length > 4) variants.push(term.slice(0, -1));
+  return variants;
+}
+
+function hasInformativeResearchSummary(source: ResearchSource) {
+  const summary = source.summary.trim();
+  return Boolean(
+    summary.length > 90 &&
+      !summary.startsWith("Scholarly metadata result for") &&
+      !summary.startsWith("OpenAlex indexes this as a relevant scholarly work"),
+  );
+}
+
+function sourceEvidenceBonus(source: ResearchSource) {
+  if (hasInformativeResearchSummary(source)) return 3;
+  if (source.kind === "encyclopedia") return 1;
+  return 0;
+}
+
+function scoreResearchSource(source: ResearchSource, terms: string[]) {
+  const title = `${source.title}`.toLowerCase();
+  const body = `${source.title} ${source.summary} ${source.source}`.toLowerCase();
+  let score = 0;
+
+  for (const term of terms) {
+    const variants = getResearchTermVariants(term);
+    if (variants.some((variant) => title.includes(variant))) {
+      score += 2;
+    } else if (variants.some((variant) => body.includes(variant))) {
+      score += 1;
+    }
+  }
+
+  const compactTopic = terms.join(" ");
+  if (compactTopic.length > 10 && body.includes(compactTopic)) {
+    score += 4;
+  }
+
+  return score + sourceEvidenceBonus(source);
+}
+
+function kindPriority(kind: ResearchSource["kind"]) {
+  if (kind === "paper") return 3;
+  if (kind === "scholarly-index") return 2;
+  if (kind === "encyclopedia") return 1;
+  return 0;
+}
+
+function rankResearchSources(sources: ResearchSource[], terms: string[]) {
+  const ranked = sources
+    .map((source) => ({ source, score: scoreResearchSource(source, terms) }))
+    .sort((a, b) => b.score - a.score || kindPriority(b.source.kind) - kindPriority(a.source.kind));
+
+  const bestScore = ranked[0]?.score || 0;
+  const minimumScore = bestScore >= 4 ? 2 : bestScore > 0 ? 1 : 0;
+  return ranked
+    .filter(({ score }) => bestScore === 0 || score >= minimumScore)
+    .map(({ source }) => source);
+}
+
+async function fetchWikipediaResearch(query: string): Promise<ResearchSource[]> {
+  const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=2&namespace=0&format=json&origin=*`;
+  const searchPayload = await fetchJsonWithTimeout(searchUrl);
+  const titles = Array.isArray(searchPayload?.[1]) ? searchPayload[1].slice(0, 2) : [];
+  const sources: ResearchSource[] = [];
+
+  for (const title of titles) {
+    const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(String(title))}`;
+    const summaryPayload = await fetchJsonWithTimeout(summaryUrl);
+    const pageTitle = cleanResearchText(summaryPayload?.title, String(title));
+    const summary = cleanResearchText(summaryPayload?.extract, "");
+    const url = cleanResearchText(summaryPayload?.content_urls?.desktop?.page, `https://en.wikipedia.org/wiki/${encodeURIComponent(String(title).replace(/\s+/g, "_"))}`);
+    if (pageTitle && summary && !summaryPayload?.disambiguation) {
+      sources.push({
+        title: pageTitle,
+        source: "Wikipedia",
+        url,
+        summary: shortText(summary, 420),
+        kind: "encyclopedia",
+      });
+    }
+  }
+
+  return sources;
+}
+
+function getCrossrefPublishedYear(item: any) {
+  const parts =
+    item?.["published-print"]?.["date-parts"]?.[0] ||
+    item?.["published-online"]?.["date-parts"]?.[0] ||
+    item?.issued?.["date-parts"]?.[0] ||
+    [];
+  return parts[0] ? String(parts[0]) : undefined;
+}
+
+async function fetchCrossrefResearch(query: string): Promise<ResearchSource[]> {
+  const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=3&select=title,DOI,URL,abstract,published-print,published-online,issued,container-title,author`;
+  const payload = await fetchJsonWithTimeout(url, 5500);
+  const items = Array.isArray(payload?.message?.items) ? payload.message.items : [];
+
+  return items
+    .map((item: any) => {
+      const title = cleanResearchText(Array.isArray(item.title) ? item.title[0] : item.title, "");
+      const journal = cleanResearchText(Array.isArray(item["container-title"]) ? item["container-title"][0] : item["container-title"], "Crossref indexed work");
+      const abstract = cleanResearchText(item.abstract, "");
+      const doi = cleanResearchText(item.DOI, "");
+      const itemUrl = cleanResearchText(item.URL, doi ? `https://doi.org/${doi}` : "");
+      const published = getCrossrefPublishedYear(item);
+      if (!title || !itemUrl) return null;
+      return {
+        title,
+        source: published ? `${journal}, ${published}` : journal,
+        url: itemUrl,
+        published,
+        summary: abstract ? shortText(abstract, 360) : `Scholarly metadata result for ${title}.`,
+        kind: "scholarly-index" as const,
+      };
+    })
+    .filter(Boolean) as ResearchSource[];
+}
+
+function getOpenAlexAbstract(abstractIndex: unknown) {
+  if (!abstractIndex || typeof abstractIndex !== "object") return "";
+  const words: string[] = [];
+  for (const [word, positions] of Object.entries(abstractIndex as Record<string, unknown>)) {
+    if (!Array.isArray(positions)) continue;
+    positions.forEach((position) => {
+      const index = Number(position);
+      if (Number.isInteger(index) && index >= 0) {
+        words[index] = word;
+      }
+    });
+  }
+  return cleanResearchText(words.filter(Boolean).join(" "), "");
+}
+
+async function fetchOpenAlexResearch(query: string): Promise<ResearchSource[]> {
+  const params = new URLSearchParams({
+    search: query,
+    "per-page": "4",
+  });
+  const openAlexEmail = cleanText(process.env.OPENALEX_EMAIL, "");
+  const openAlexKey = cleanText(process.env.OPENALEX_API_KEY, "");
+  if (openAlexEmail) params.set("mailto", openAlexEmail);
+  if (openAlexKey) params.set("api_key", openAlexKey);
+
+  const payload = await fetchJsonWithTimeout(`https://api.openalex.org/works?${params.toString()}`, 6500);
+  const items = Array.isArray(payload?.results) ? payload.results : [];
+
+  return items
+    .map((item: any) => {
+      const title = cleanResearchText(item?.display_name, "");
+      const abstract = getOpenAlexAbstract(item?.abstract_inverted_index);
+      const year = item?.publication_year ? String(item.publication_year) : undefined;
+      const sourceName = cleanResearchText(item?.primary_location?.source?.display_name, "OpenAlex indexed work");
+      const doi = cleanResearchText(item?.doi, "");
+      const itemUrl = cleanResearchText(item?.primary_location?.landing_page_url || doi || item?.id, "");
+      if (!title || !itemUrl) return null;
+      return {
+        title,
+        source: year ? `${sourceName}, ${year}` : sourceName,
+        url: itemUrl,
+        published: year,
+        summary: abstract
+          ? shortText(abstract, 460)
+          : `OpenAlex indexes this as a relevant scholarly work: ${title}. Use the title and venue as a lead, then verify the full paper before treating it as a finding.`,
+        kind: abstract ? "paper" as const : "scholarly-index" as const,
+      };
+    })
+    .filter(Boolean) as ResearchSource[];
+}
+
+async function fetchArxivResearch(query: string): Promise<ResearchSource[]> {
+  const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=3&sortBy=relevance&sortOrder=descending`;
+  const xml = await fetchTextWithTimeout(url, 6500);
+  if (!xml) return [];
+
+  const entries = xml.match(/<entry\b[\s\S]*?<\/entry>/gi) || [];
+  return entries
+    .map((entry) => {
+      const title = cleanResearchText(getXmlTagValue(entry, "title"), "");
+      const summary = cleanResearchText(getXmlTagValue(entry, "summary"), "");
+      const published = cleanResearchText(getXmlTagValue(entry, "published"), "").slice(0, 10);
+      const entryUrl = cleanResearchText(getXmlTagValue(entry, "id"), "");
+      if (!title || !summary || !entryUrl) return null;
+      return {
+        title,
+        source: published ? `arXiv, ${published}` : "arXiv",
+        url: entryUrl,
+        published,
+        summary: shortText(summary, 420),
+        kind: "paper" as const,
+      };
+    })
+    .filter(Boolean) as ResearchSource[];
+}
+
+async function fetchTopicResearch(topic: string): Promise<ResearchSource[]> {
+  const terms = getResearchTerms(topic);
+  const query = getResearchQuery(topic);
+  const results = await Promise.allSettled([
+    fetchWikipediaResearch(query),
+    fetchCrossrefResearch(query),
+    fetchOpenAlexResearch(query),
+    fetchArxivResearch(query),
+  ]);
+  const [wikipedia, crossref, openAlex, arxiv] = results.map((result) => (result.status === "fulfilled" ? result.value : []));
+  const seen = new Set<string>();
+  const dedupedSources = [...openAlex, ...arxiv, ...crossref, ...wikipedia]
+    .filter((source) => {
+      const key = `${source.title}|${source.url}`.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .filter((source) => scoreResearchSource(source, terms) > 0 || terms.length === 0)
+    .sort((a, b) => scoreResearchSource(b, terms) - scoreResearchSource(a, terms) || kindPriority(b.kind) - kindPriority(a.kind))
+    .slice(0, 12);
+  return rankResearchSources(dedupedSources, terms).slice(0, 7);
 }
 
 function stripCdata(value: string) {
@@ -634,6 +988,47 @@ function estimateSeconds(dialogue: string): number {
   return Math.max(6, Math.ceil(words / 2.45) + 1);
 }
 
+function fitScriptToTargetDuration(script: Array<{ durationSeconds: number; estimatedStartSeconds: number }>, targetSeconds: number) {
+  if (script.length === 0) return 0;
+  const rawTotal = script.reduce((sum, line) => sum + Math.max(1, Number(line.durationSeconds) || 1), 0);
+  const scale = rawTotal > 0 ? targetSeconds / rawTotal : 1;
+  let cursor = 0;
+
+  for (const line of script) {
+    line.estimatedStartSeconds = cursor;
+    line.durationSeconds = Math.max(3, Math.round(line.durationSeconds * scale));
+    cursor += line.durationSeconds;
+  }
+
+  let delta = targetSeconds - cursor;
+  for (let index = script.length - 1; index >= 0 && delta !== 0; index -= 1) {
+    const line = script[index];
+    if (delta > 0) {
+      line.durationSeconds += delta;
+      delta = 0;
+    } else {
+      const reduction = Math.min(-delta, Math.max(0, line.durationSeconds - 3));
+      line.durationSeconds -= reduction;
+      delta += reduction;
+    }
+  }
+
+  while (delta < 0 && script.length > 1) {
+    const removed = script.pop();
+    delta += removed?.durationSeconds || 0;
+  }
+  if (delta > 0 && script.length > 0) {
+    script[script.length - 1].durationSeconds += delta;
+  }
+
+  cursor = 0;
+  for (const line of script) {
+    line.estimatedStartSeconds = cursor;
+    cursor += line.durationSeconds;
+  }
+  return cursor;
+}
+
 function normalizeAudioText(value: string) {
   return value
     .replace(/\bECHO\b/g, "Echo")
@@ -645,35 +1040,34 @@ function normalizeAudioText(value: string) {
 }
 
 function buildAudioPreviewText(req: AudioRequest) {
+  return buildAudioPreviewSegments(req).map((segment) => segment.text).join("\n\n");
+}
+
+function buildAudioPreviewSegments(req: AudioRequest): AudioSegment[] {
   const script = Array.isArray(req.script) ? req.script : [];
-  const maxSeconds = Math.max(30, Math.min(Number(req.maxSeconds) || 240, 600));
+  const maxSeconds = Math.max(30, Math.min(Number(req.maxSeconds) || 240, MAX_CUSTOM_DURATION_SECONDS));
   let cursor = 0;
-  const lines: string[] = [];
+  const segments: AudioSegment[] = [];
 
   for (const line of script) {
     const dialogue = cleanText(line.dialogue, "");
     if (!dialogue) continue;
     const durationSeconds = Math.max(1, Number(line.durationSeconds) || estimateSeconds(dialogue));
-    if (cursor + durationSeconds > maxSeconds && lines.length > 0) break;
-    lines.push(normalizeAudioText(dialogue));
+    if (cursor + durationSeconds > maxSeconds && segments.length > 0) break;
+    segments.push({
+      speakerName: cleanText(line.speakerName, "Host"),
+      text: normalizeAudioText(dialogue),
+      durationSeconds,
+    });
     cursor += durationSeconds;
   }
 
-  return lines.join("\n\n");
+  return segments;
 }
 
-async function synthesizeWithPiper(text: string, voiceId?: string) {
-  const status = getAudioEngineStatus();
-  if (!status.piperAvailable) {
-    throw new Error("Piper neural TTS is not installed. Run .\\install-piper.ps1, then restart the app.");
-  }
+type PiperVoice = (typeof PIPER_VOICES)[number];
 
-  const voices = getAvailablePiperVoices();
-  const selectedVoice = voices.find((voice) => voice.id === voiceId) || voices[0];
-  const outDir = path.join(process.cwd(), "tmp-audio");
-  const outFile = path.join(outDir, `${randomUUID()}.wav`);
-  await fsp.mkdir(outDir, { recursive: true });
-
+async function runPiperToFile(text: string, selectedVoice: PiperVoice, outFile: string) {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(PIPER_EXE, ["--model", selectedVoice.model, "--output_file", outFile], {
       cwd: path.dirname(PIPER_EXE),
@@ -691,6 +1085,146 @@ async function synthesizeWithPiper(text: string, voiceId?: string) {
     });
     child.stdin.end(text);
   });
+}
+
+type WavFormat = {
+  audioFormat: number;
+  channels: number;
+  sampleRate: number;
+  byteRate: number;
+  blockAlign: number;
+  bitsPerSample: number;
+};
+
+function readWavData(buffer: Buffer): { format: WavFormat; data: Buffer } {
+  if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error("Piper returned an unsupported audio file.");
+  }
+
+  let offset = 12;
+  let format: WavFormat | null = null;
+  let data: Buffer | null = null;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString("ascii", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const chunkStart = offset + 8;
+    const chunkEnd = Math.min(chunkStart + chunkSize, buffer.length);
+
+    if (chunkId === "fmt ") {
+      format = {
+        audioFormat: buffer.readUInt16LE(chunkStart),
+        channels: buffer.readUInt16LE(chunkStart + 2),
+        sampleRate: buffer.readUInt32LE(chunkStart + 4),
+        byteRate: buffer.readUInt32LE(chunkStart + 8),
+        blockAlign: buffer.readUInt16LE(chunkStart + 12),
+        bitsPerSample: buffer.readUInt16LE(chunkStart + 14),
+      };
+    } else if (chunkId === "data") {
+      data = buffer.subarray(chunkStart, chunkEnd);
+    }
+
+    offset = chunkEnd + (chunkSize % 2);
+  }
+
+  if (!format || !data) {
+    throw new Error("Piper returned a WAV file without usable audio data.");
+  }
+  if (format.audioFormat !== 1) {
+    throw new Error("Piper returned a compressed WAV format that cannot be stitched locally.");
+  }
+
+  return { format, data };
+}
+
+function sameWavFormat(a: WavFormat, b: WavFormat) {
+  return a.audioFormat === b.audioFormat &&
+    a.channels === b.channels &&
+    a.sampleRate === b.sampleRate &&
+    a.byteRate === b.byteRate &&
+    a.blockAlign === b.blockAlign &&
+    a.bitsPerSample === b.bitsPerSample;
+}
+
+function makeSilence(format: WavFormat, milliseconds: number) {
+  const frameCount = Math.round((format.sampleRate * milliseconds) / 1000);
+  return Buffer.alloc(frameCount * format.blockAlign);
+}
+
+function buildWav(format: WavFormat, data: Buffer) {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(format.audioFormat, 20);
+  header.writeUInt16LE(format.channels, 22);
+  header.writeUInt32LE(format.sampleRate, 24);
+  header.writeUInt32LE(format.byteRate, 28);
+  header.writeUInt16LE(format.blockAlign, 32);
+  header.writeUInt16LE(format.bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+function getSpeakerIndex(speakerName: string, speakers: RequestedSpeaker[] | undefined) {
+  if (!Array.isArray(speakers)) return -1;
+  return speakers.findIndex((speaker) => cleanText(speaker.name, "") === speakerName);
+}
+
+function choosePiperVoiceForSpeaker(
+  speakerName: string,
+  speakers: RequestedSpeaker[] | undefined,
+  voices: PiperVoice[],
+  requestedVoiceId?: string,
+) {
+  const selectedVoice = voices.find((voice) => voice.id === requestedVoiceId);
+  if (voices.length <= 1) return selectedVoice || voices[0];
+
+  const speakerIndex = Math.max(0, getSpeakerIndex(speakerName, speakers));
+  const speaker = Array.isArray(speakers) ? speakers[speakerIndex] : undefined;
+  const style = `${speaker?.gender || ""} ${speaker?.style || ""} ${speakerName}`.toLowerCase();
+
+  if (selectedVoice && speakerIndex === 0) return selectedVoice;
+  if (style.includes("male")) return voices.find((voice) => voice.id === "ryan") || voices[speakerIndex % voices.length];
+  if (style.includes("female")) return voices.find((voice) => voice.id === "amy") || voices.find((voice) => voice.id === "lessac") || voices[speakerIndex % voices.length];
+  if (style.includes("skeptical")) return voices.find((voice) => voice.id === "ryan") || voices[speakerIndex % voices.length];
+  if (style.includes("enthusiastic")) return voices.find((voice) => voice.id === "amy") || voices[speakerIndex % voices.length];
+  return voices[(speakerIndex + hashString(speakerName)) % voices.length];
+}
+
+function compactPiperSegments(segments: AudioSegment[], maxSegments = 96) {
+  if (segments.length <= maxSegments) return segments;
+  const chunkSize = Math.ceil(segments.length / maxSegments);
+  const compacted: AudioSegment[] = [];
+
+  for (let index = 0; index < segments.length; index += chunkSize) {
+    const chunk = segments.slice(index, index + chunkSize);
+    compacted.push({
+      speakerName: chunk[0]?.speakerName || "Host",
+      text: chunk.map((segment) => segment.text).join("\n\n"),
+      durationSeconds: chunk.reduce((sum, segment) => sum + segment.durationSeconds, 0),
+    });
+  }
+
+  return compacted;
+}
+
+async function synthesizeWithPiper(text: string, voiceId?: string) {
+  const status = getAudioEngineStatus();
+  if (!status.piperAvailable) {
+    throw new Error("Piper neural TTS is not installed. Run .\\install-piper.ps1, then restart the app.");
+  }
+
+  const voices = getAvailablePiperVoices();
+  const selectedVoice = voices.find((voice) => voice.id === voiceId) || voices[0];
+  const outDir = path.join(process.cwd(), "tmp-audio");
+  const outFile = path.join(outDir, `${randomUUID()}.wav`);
+  await fsp.mkdir(outDir, { recursive: true });
+
+  await runPiperToFile(text, selectedVoice, outFile);
 
   const audio = await fsp.readFile(outFile);
   await fsp.unlink(outFile).catch(() => undefined);
@@ -698,6 +1232,65 @@ async function synthesizeWithPiper(text: string, voiceId?: string) {
     audio: audio.toString("base64"),
     voice: { id: selectedVoice.id, name: selectedVoice.name },
   };
+}
+
+async function synthesizeWithPiperCast(req: AudioRequest) {
+  const status = getAudioEngineStatus();
+  if (!status.piperAvailable) {
+    throw new Error("Piper neural TTS is not installed. Run .\\install-piper.ps1, then restart the app.");
+  }
+
+  const voices = getAvailablePiperVoices();
+  const segments = compactPiperSegments(buildAudioPreviewSegments(req));
+  if (segments.length === 0) {
+    throw new Error("No script text was provided for audio generation.");
+  }
+  if (voices.length < 2) {
+    return synthesizeWithPiper(segments.map((segment) => segment.text).join("\n\n"), req.voiceId);
+  }
+
+  const outDir = path.join(process.cwd(), "tmp-audio");
+  const batchId = randomUUID();
+  const outputFiles: string[] = [];
+  await fsp.mkdir(outDir, { recursive: true });
+
+  try {
+    let wavFormat: WavFormat | null = null;
+    const audioParts: Buffer[] = [];
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const selectedVoice = choosePiperVoiceForSpeaker(segment.speakerName, req.speakers, voices, req.voiceId);
+      const outFile = path.join(outDir, `${batchId}-${String(index).padStart(3, "0")}.wav`);
+      outputFiles.push(outFile);
+      await runPiperToFile(segment.text, selectedVoice, outFile);
+
+      const wav = readWavData(await fsp.readFile(outFile));
+      if (!wavFormat) {
+        wavFormat = wav.format;
+      } else if (!sameWavFormat(wavFormat, wav.format)) {
+        throw new Error("Selected Piper voices use incompatible WAV formats.");
+      }
+
+      audioParts.push(wav.data);
+      if (index < segments.length - 1) {
+        audioParts.push(makeSilence(wavFormat, 140));
+      }
+    }
+
+    if (!wavFormat) {
+      throw new Error("Piper did not generate audio.");
+    }
+
+    const audio = buildWav(wavFormat, Buffer.concat(audioParts));
+    const voiceNames = voices.map((voice) => voice.name.replace(/\s*English Medium$/i, "")).join(", ");
+    return {
+      audio: audio.toString("base64"),
+      voice: { id: "piper-cast", name: `Piper Cast: ${voiceNames}` },
+    };
+  } finally {
+    await Promise.all(outputFiles.map((file) => fsp.unlink(file).catch(() => undefined)));
+  }
 }
 
 async function synthesizeWithElevenLabs(text: string, voiceId?: string, modelId?: string) {
@@ -745,33 +1338,105 @@ function extensionFromMimeType(mimeType: string) {
   return ".wav";
 }
 
-async function synthesizeWithChatterbox(text: string, references: VoiceReferenceRequest[] | undefined) {
-  if (!fileExists(CHATTERBOX_PYTHON) || !fileExists(CHATTERBOX_SCRIPT)) {
-    throw new Error("Free local voice cloning is not installed. Run .\\install-chatterbox.ps1, restart the app, then use Local Clone.");
+function compactChatterboxSegments(segments: AudioSegment[], maxCharacters = 1400, maxSegments = 18) {
+  const compacted: AudioSegment[] = [];
+  let usedCharacters = 0;
+
+  for (const segment of segments) {
+    if (usedCharacters >= maxCharacters || compacted.length >= maxSegments) break;
+    const remainingCharacters = maxCharacters - usedCharacters;
+    const text = segment.text.slice(0, remainingCharacters).trim();
+    if (!text) continue;
+
+    const previous = compacted[compacted.length - 1];
+    if (previous?.speakerName === segment.speakerName && previous.text.length + text.length <= 360) {
+      previous.text = `${previous.text} ${text}`;
+      previous.durationSeconds += segment.durationSeconds;
+    } else {
+      compacted.push({ ...segment, text });
+    }
+    usedCharacters += text.length;
   }
 
-  const reference = Array.isArray(references)
-    ? references.find((item) => item.consentConfirmed && cleanText(item.dataUrl, ""))
-    : undefined;
-  if (!reference) {
-    throw new Error("Upload a voice reference and confirm permission before using Local Clone.");
+  return compacted;
+}
+
+function findChatterboxReferenceForSpeaker(
+  speakerName: string,
+  speakers: RequestedSpeaker[] | undefined,
+  references: VoiceReferenceRequest[],
+) {
+  if (references.length === 0) return undefined;
+  const speakerIndex = Math.max(0, (speakers || []).findIndex((speaker) => cleanText(speaker.name, "") === speakerName));
+  const speaker = (speakers || [])[speakerIndex];
+  const referenceId = cleanText(speaker?.voiceReferenceId, "");
+  const referenceName = cleanText(speaker?.voiceReferenceName, "").toLowerCase();
+
+  const assignedReference = references.find((reference) => {
+    const ids = [cleanText(reference.id, ""), cleanText(reference.clonedVoiceId, "")].filter(Boolean);
+    const names = [cleanText(reference.name, ""), cleanText(reference.clonedVoiceName, "")]
+      .filter(Boolean)
+      .map((name) => name.toLowerCase());
+    return (referenceId && ids.includes(referenceId)) || (referenceName && names.includes(referenceName));
+  });
+
+  if (assignedReference) return assignedReference;
+  if (references.length === 1) return references[0];
+  return references[speakerIndex % references.length];
+}
+
+async function synthesizeWithChatterbox(req: AudioRequest) {
+  if (!getAudioEngineStatus().chatterboxAvailable) {
+    throw new Error("Chatterbox HD is not installed. Run .\\install-chatterbox.ps1, restart the app, then generate HD audio.");
   }
 
-  const decoded = decodeReferenceAudio(reference);
+  const segments = compactChatterboxSegments(buildAudioPreviewSegments(req));
+  if (segments.length === 0) throw new Error("No script text was provided for Chatterbox generation.");
+
+  const references = Array.isArray(req.voiceReferences)
+    ? req.voiceReferences.filter((item) => item.consentConfirmed && cleanText(item.dataUrl, ""))
+    : [];
   const outDir = path.join(process.cwd(), "tmp-audio");
-  await fsp.mkdir(outDir, { recursive: true });
+  await Promise.all([
+    fsp.mkdir(outDir, { recursive: true }),
+    fsp.mkdir(CHATTERBOX_CACHE_DIR, { recursive: true }),
+    fsp.mkdir(path.join(LOCAL_TTS_DIR, "temp"), { recursive: true }),
+  ]);
   const id = randomUUID();
-  const referenceFile = path.join(outDir, `${id}-reference${extensionFromMimeType(decoded.mimeType)}`);
-  const textFile = path.join(outDir, `${id}.txt`);
+  const manifestFile = path.join(outDir, `${id}-segments.json`);
   const outFile = path.join(outDir, `${id}.wav`);
-  const previewText = text.slice(0, 1400);
-  await fsp.writeFile(referenceFile, decoded.buffer);
-  await fsp.writeFile(textFile, previewText, "utf8");
+  const referenceFiles = new Map<VoiceReferenceRequest, string>();
+
+  for (const [index, reference] of references.entries()) {
+    const decoded = decodeReferenceAudio(reference);
+    const referenceFile = path.join(outDir, `${id}-reference-${index}${extensionFromMimeType(decoded.mimeType)}`);
+    await fsp.writeFile(referenceFile, decoded.buffer);
+    referenceFiles.set(reference, referenceFile);
+  }
+
+  const manifest = {
+    segments: segments.map((segment) => {
+      const reference = findChatterboxReferenceForSpeaker(segment.speakerName, req.speakers, references);
+      return {
+        text: segment.text,
+        voice: reference ? referenceFiles.get(reference) : undefined,
+      };
+    }),
+  };
+  await fsp.writeFile(manifestFile, JSON.stringify(manifest), "utf8");
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(CHATTERBOX_PYTHON, [CHATTERBOX_SCRIPT, "--text-file", textFile, "--voice", referenceFile, "--out", outFile], {
+      const child = spawn(CHATTERBOX_PYTHON, [CHATTERBOX_SCRIPT, "--segments-file", manifestFile, "--out", outFile], {
         cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HF_HOME: CHATTERBOX_CACHE_DIR,
+          HUGGINGFACE_HUB_CACHE: path.join(CHATTERBOX_CACHE_DIR, "hub"),
+          TORCH_HOME: path.join(CHATTERBOX_CACHE_DIR, "torch"),
+          TEMP: path.join(LOCAL_TTS_DIR, "temp"),
+          TMP: path.join(LOCAL_TTS_DIR, "temp"),
+        },
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -787,14 +1452,20 @@ async function synthesizeWithChatterbox(text: string, references: VoiceReference
     });
 
     const audio = await fsp.readFile(outFile);
+    const voiceNames = references
+      .map((reference) => cleanText(reference.clonedVoiceName || reference.name, ""))
+      .filter(Boolean);
     return {
       audio: audio.toString("base64"),
-      voice: { id: cleanText(reference.clonedVoiceId, "local-clone"), name: cleanText(reference.clonedVoiceName || reference.name, "Local cloned voice") },
+      voice: {
+        id: voiceNames.length > 0 ? "chatterbox-cast" : "chatterbox-natural",
+        name: voiceNames.length > 0 ? `Chatterbox Cast: ${voiceNames.join(", ")}` : "Chatterbox Natural Voice",
+      },
     };
   } finally {
     await Promise.all([
-      fsp.unlink(referenceFile).catch(() => undefined),
-      fsp.unlink(textFile).catch(() => undefined),
+      ...Array.from(referenceFiles.values()).map((referenceFile) => fsp.unlink(referenceFile).catch(() => undefined)),
+      fsp.unlink(manifestFile).catch(() => undefined),
       fsp.unlink(outFile).catch(() => undefined),
     ]);
   }
@@ -918,94 +1589,183 @@ async function cloneElevenLabsVoice({
   };
 }
 
-function getLineTemplate(index: number, topic: string, imageContext: string, musicMood: string, duration: string) {
-  const topicShort = shortText(topic, 132);
-  const visualCue = imageContext ? ` The uploaded visual prompt adds this production cue: ${shortText(imageContext, 150)}.` : "";
-  const templates = [
-    `Welcome to ECHO Studios. Today we are turning one prompt into a full episode: ${topicShort}.`,
-    `The hook is simple: if someone only has one minute, they should leave understanding why this matters right now.`,
-    `Let's set the scene first. The strongest angle is not just the topic itself, but the tension hiding inside it.`,
-    `I hear that tension too. One side says this is obvious, and the other side says the details change everything.`,
-    `Here is the clean version: ${topicShort} is really a story about choices, tradeoffs, and the systems around them.`,
-    `That is where the episode gets useful. We can move from a headline into actual consequences people can picture.${visualCue}`,
-    `A good example would be a listener asking, "What would I do differently after hearing this?" That question keeps us honest.`,
-    `Exactly. If the answer is only trivia, the episode is thin. If the answer changes a decision, we have a real show.`,
-    `So the first takeaway is context. Do not treat this as isolated; treat it as part of a bigger pattern.`,
-    `The second takeaway is incentives. People, companies, and communities usually move toward whatever gets rewarded.`,
-    `And the third takeaway is timing. Some ideas sound impossible until the surrounding tools make them feel normal.`,
-    `Let me challenge that for a second. There is also a risk of making the topic sound cleaner than it really is.`,
-    `That is fair. The messy part is where good podcasts live, because listeners can hear the hosts working through uncertainty.`,
-    `If we were producing this as a series, I would split it into origin story, pressure points, and the next practical move.`,
-    `The origin story gives us stakes. The pressure points give us conflict. The practical move gives the listener a reason to stay.`,
-    `For sound design, ${musicMood} should sit underneath the intro, then step back so the conversation feels close and human.`,
-    `There is also a visual identity here. The cover should make the prompt feel specific, not generic or overly polished.`,
-    `A smart midpoint question is: who benefits if this future happens, and who gets asked to absorb the cost?`,
-    `That question opens the door to nuance. It keeps the show from sounding like an advertisement for one point of view.`,
-    `I would bring in a short counterargument here, then let the hosts test it instead of instantly dismissing it.`,
-    `The counterargument is that the entire premise might be overstated. Maybe the trend is real, but the timeline is exaggerated.`,
-    `And the response is that timelines can be wrong while direction can still matter. That is a very podcast-friendly distinction.`,
-    `For listeners building something, the practical advice is to watch weak signals before they become obvious demand.`,
-    `For listeners just curious, the advice is to ask better questions and avoid treating the loudest claim as the most likely one.`,
-    `This is also where a guest clip would work: someone with firsthand experience giving a grounded thirty-second story.`,
-    `Then we come back to the hosts and ask what changed in their mind after hearing that story.`,
-    `The answer should be specific. Maybe a risk feels smaller, maybe an opportunity feels nearer, or maybe the ethics get sharper.`,
-    `That emotional turn matters. Great episodes are not only informative; they let the listener feel their own opinion updating.`,
-    `Before the outro, I would recap the clearest claim: ${shortText(topic, 110)} deserves attention because the second-order effects are the story.`,
-    `And I would leave one open loop for a follow-up episode, because a good prompt should feel like the start of a show universe.`,
-    `Final thought: the best version of this episode is curious, specific, and willing to say "we do not know yet" when that is true.`,
-    `Thanks for listening to ECHO Studios. Save the prompt, revise the angle, and build the next episode from the strongest question.`,
-  ];
+type EpisodeFormat = {
+  id: "evidence-ladder" | "myth-check" | "source-debate" | "timeline" | "field-guide" | "case-file";
+  title: string;
+  chapterTitles: string[];
+};
 
-  if (duration === "short") return templates[index % 10];
-  if (duration === "medium") return templates[index % 18];
-  if (duration === "long" && index < templates.length) return templates[index];
+const EPISODE_FORMATS: EpisodeFormat[] = [
+  {
+    id: "evidence-ladder",
+    title: "Evidence Ladder",
+    chapterTitles: ["Cold Open", "Baseline Facts", "Finding One", "Finding Two", "Counterweight", "What Changes", "Final Claim"],
+  },
+  {
+    id: "myth-check",
+    title: "Myth Check",
+    chapterTitles: ["The Claim", "What Sources Say", "What Gets Exaggerated", "What Holds Up", "Practical Read", "Verdict"],
+  },
+  {
+    id: "source-debate",
+    title: "Source Debate",
+    chapterTitles: ["Opening Position", "Source A", "Source B", "The Disagreement", "Synthesis", "Listener Decision"],
+  },
+  {
+    id: "timeline",
+    title: "Timeline Investigation",
+    chapterTitles: ["Where It Starts", "Early Evidence", "Recent Evidence", "Turning Point", "Current Read", "Next Question"],
+  },
+  {
+    id: "field-guide",
+    title: "Field Guide",
+    chapterTitles: ["What To Notice", "Key Terms", "Evidence In The Wild", "Red Flags", "Useful Questions", "Takeaway"],
+  },
+  {
+    id: "case-file",
+    title: "Case File",
+    chapterTitles: ["Exhibit A", "Exhibit B", "The Missing Piece", "Competing Theory", "What We Can Say", "Close"],
+  },
+];
 
-  const section = Math.floor(index / 12) + 1;
-  const beat = index % 12;
-  const lenses = [
-    "origin story",
-    "current landscape",
-    "human stakes",
-    "technical details",
-    "money and incentives",
-    "creative angle",
-    "skeptical read",
-    "future scenario",
-    "practical playbook",
-    "listener questions",
-  ];
-  const questions = [
-    "what changes when this becomes normal",
-    "who benefits first and who waits",
-    "what most people misunderstand",
-    "which assumption deserves pressure",
-    "what a careful creator should do next",
-    "where the obvious answer breaks down",
-  ];
-  const lens = lenses[section % lenses.length];
-  const question = questions[(section + beat) % questions.length];
-
-  const longFormTemplates = [
-    `For segment ${section}, let's take the ${lens} and connect it back to ${topicShort}.`,
-    `The guiding question here is ${question}, because that is where the episode finds momentum.`,
-    `One useful way to frame it is to separate the headline from the mechanism underneath it.`,
-    `The headline gets attention, but the mechanism explains why people should keep listening.`,
-    `If a listener is skeptical, I would not ask them to agree yet. I would ask them to notice the pattern.`,
-    `That pattern shows up in small decisions first, then in budgets, tools, habits, and finally culture.`,
-    `There is a strong counterpoint too. Sometimes the story sounds bigger because everyone is repeating the same simple version.`,
-    `So we should slow down and ask what evidence would actually change our minds on this point.`,
-    `The practical takeaway is not to predict everything. It is to identify the next decision that becomes easier after hearing this.`,
-    `For production, keep the sound bed close to ${musicMood}, but let the voices stay upfront and intimate.`,
-    imageContext
-      ? `The image prompt should influence this section visually: ${shortText(imageContext, 145)}.`
-      : `The cover art for this section should feel specific to the topic, not like a generic technology poster.`,
-    `Before we move to the next segment, the cleanest summary is that ${shortText(topic, 115)} is really about second-order effects.`,
-  ];
-
-  return longFormTemplates[beat];
+function hashString(value: string) {
+  return Array.from(value).reduce((sum, letter) => sum + letter.charCodeAt(0), 0);
 }
 
-function buildLocalPodcast(req: LocalPodcastRequest) {
+function chooseEpisodeFormat(topic: string, sources: ResearchSource[], targetSeconds: number): EpisodeFormat {
+  const key = `${topic}|${targetSeconds}|${sources.map((source) => source.title).join("|")}`;
+  return EPISODE_FORMATS[hashString(key) % EPISODE_FORMATS.length];
+}
+
+function getSourceAt(sources: ResearchSource[], index: number) {
+  if (sources.length === 0) return null;
+  return sources[index % sources.length];
+}
+
+function sourceLabel(source: ResearchSource | null) {
+  if (!source) return "the available research";
+  return `${source.title} (${source.source})`;
+}
+
+function sourceFact(source: ResearchSource | null, max = 230) {
+  if (!source) {
+    return "live sources were not reachable, so this episode should treat claims as hypotheses and avoid pretending uncertainty is settled.";
+  }
+  return shortText(source.summary, max);
+}
+
+function getLineTemplate(
+  index: number,
+  topic: string,
+  imageContext: string,
+  musicMood: string,
+  _duration: string,
+  researchSources: ResearchSource[],
+  episodeFormat: EpisodeFormat,
+) {
+  const topicShort = shortText(topic, 132);
+  const source = getSourceAt(researchSources, index);
+  const nextSource = getSourceAt(researchSources, index + 1);
+  const contrastSource = getSourceAt(researchSources, index + 2);
+  const sourceName = sourceLabel(source);
+  const nextName = sourceLabel(nextSource);
+  const contrastName = sourceLabel(contrastSource);
+  const fact = sourceFact(source);
+  const nextFact = sourceFact(nextSource);
+  const contrastFact = sourceFact(contrastSource);
+  const visualCue = imageContext ? ` The uploaded image cue adds this concrete production detail: ${shortText(imageContext, 150)}` : "";
+  const section = Math.floor(index / 9) + 1;
+  const beat = index % 9;
+  const noSources = researchSources.length === 0;
+
+  if (noSources) {
+    const cautiousLines = [
+      `Today we are treating "${topicShort}" as an open research question, because live source lookup did not return usable material.`,
+      `That means the honest structure is different: separate what sounds plausible from what we can actually support.`,
+      `The first pass is to name the claim clearly, then ask what evidence would be needed before repeating it as fact.`,
+      `A careful episode should tell listeners where the confidence is low instead of filling the gap with certainty.`,
+      `The useful move is to build a checklist: definitions, dates, named examples, opposing explanations, and what would falsify the story.`,
+      `For production, keep ${musicMood} subtle and let the uncertainty become part of the episode rather than hiding it.`,
+      visualCue || `The cover and show notes should flag this as an exploratory episode, not a settled report.`,
+      `The takeaway is not a fake answer; it is a sharper question the listener can research next.`,
+      `Before closing, restate the limits: this draft needs source review before publication.`,
+    ];
+    return cautiousLines[beat];
+  }
+
+  const formatLines: Record<EpisodeFormat["id"], string[]> = {
+    "evidence-ladder": [
+      `Open with the claim: ${topicShort}. Then ground it immediately in ${sourceName}, which says ${fact}`,
+      `The next rung is ${nextName}. Its useful contribution is this: ${nextFact}`,
+      `Now compare those two sources. If they agree, the episode can say the pattern is supported; if they differ, make that difference the story.`,
+      `${contrastName} adds a third angle: ${contrastFact}`,
+      `The practical question for listeners is what changes once those source claims are treated as evidence rather than vibes.`,
+      `A skeptical read is still necessary: sources can describe a pattern without proving every causal claim people attach to it.`,
+      visualCue || `For the sound bed, ${musicMood} should stay low so the evidence, not the music, carries the tension.`,
+      `The cleanest midpoint summary is: ${sourceName} gives context, ${nextName} gives a second anchor, and the episode should not go beyond those anchors.`,
+      `Close this section by asking what new source would most change the conclusion.`,
+    ],
+    "myth-check": [
+      `Start with the popular version of ${topicShort}, then test it against ${sourceName}: ${fact}`,
+      `Myth check number one: if the source only supports a narrower claim, say the narrower claim out loud.`,
+      `${nextName} gives the second check: ${nextFact}`,
+      `The part that often gets exaggerated is the jump from "there is evidence" to "the whole story is settled."`,
+      `${contrastName} keeps us honest because it frames the issue this way: ${contrastFact}`,
+      `The verdict so far is mixed: the topic is real enough to investigate, but each source limits what we can responsibly claim.`,
+      visualCue || `The cover art should feel like a fact-check file, not a hype poster.`,
+      `Translate that for listeners: believe the sourced part, pause on the unsourced leap, and keep the strongest counterexample in view.`,
+      `End the pass with a plain verdict: supported, unsupported, or still open based on the sources we actually found.`,
+    ],
+    "source-debate": [
+      `Frame the episode as a debate over ${topicShort}, with ${sourceName} making the first strong case: ${fact}`,
+      `The opposing pressure comes from ${nextName}, which emphasizes: ${nextFact}`,
+      `Do not force the sources to agree. Let the hosts argue over why the emphasis changes from one source to the next.`,
+      `${contrastName} becomes the tie-breaker or complication: ${contrastFact}`,
+      `One host should ask whether the disagreement is about facts, definitions, timelines, or incentives.`,
+      `The other host should answer by pointing back to the exact source language rather than inventing a conclusion.`,
+      visualCue || `Use ${musicMood} like a debate room tone: present, but never louder than the evidence.`,
+      `The synthesis is not "both sides are equal"; it is identifying which claim has the strongest support and which claim still needs proof.`,
+      `Close with the listener decision: what would you now accept, reject, or research further?`,
+    ],
+    timeline: [
+      `Build this as a timeline. The first timestamp comes from ${sourceName}: ${fact}`,
+      `${nextName} gives the next marker: ${nextFact}`,
+      `The transition between those markers is the story; ask what changed in evidence, tools, culture, or incentives.`,
+      `${contrastName} adds a later or alternate marker: ${contrastFact}`,
+      `If the dates do not line up neatly, say that. Messy timelines are more honest than fake inevitability.`,
+      `The current moment in ${topicShort} should be described as a snapshot, not the final chapter.`,
+      visualCue || `Let ${musicMood} create movement between timeline beats without making it feel like a trailer.`,
+      `The listener takeaway is a sequence: what came first, what changed, and what is still unresolved.`,
+      `End this section by naming the next event or source that would update the timeline.`,
+    ],
+    "field-guide": [
+      `Make this a field guide to ${topicShort}. The first thing to notice comes from ${sourceName}: ${fact}`,
+      `The second thing to notice comes from ${nextName}: ${nextFact}`,
+      `Give listeners a diagnostic question: when they see this topic in the wild, what detail should they check first?`,
+      `${contrastName} adds a warning label: ${contrastFact}`,
+      `Turn that into a red flag: if a claim ignores the source limits, it is probably overselling the conclusion.`,
+      `Then give a green flag: claims that cite definitions, dates, examples, and uncertainty are easier to trust.`,
+      visualCue || `The artwork should look like a practical guide, with one clear visual metaphor instead of generic tech fog.`,
+      `The useful habit is to ask, "What source would prove this, and what source would disprove it?"`,
+      `Close the field note with one action the listener can take before sharing the claim.`,
+    ],
+    "case-file": [
+      `Open the case file on ${topicShort}. Exhibit ${section}A is ${sourceName}: ${fact}`,
+      `Exhibit ${section}B is ${nextName}: ${nextFact}`,
+      `The missing piece is the bridge between those exhibits. What do they imply, and what do they not prove?`,
+      `${contrastName} adds the complication: ${contrastFact}`,
+      `A good investigator does not flatten that complication. They ask whether it changes the theory of the case.`,
+      `The working theory should be stated carefully, with the strongest source named and the weakest assumption exposed.`,
+      visualCue || `For ${musicMood}, use a restrained investigative feel, not melodrama.`,
+      `The case-file summary is: here is what the evidence supports, here is what remains circumstantial, and here is the next lead.`,
+      `End by telling listeners what would close the case, or why it remains open.`,
+    ],
+  };
+
+  return formatLines[episodeFormat.id][beat];
+}
+
+async function buildLocalPodcast(req: LocalPodcastRequest) {
   const topic = cleanText(req.topic, "A creator-led conversation about a new idea");
   const fallbackDuration = req.duration && req.duration in DURATION_TARGET_SECONDS ? req.duration : "hour";
   const requestedDurationSeconds = Math.round(Number(req.durationSeconds) || 0);
@@ -1013,9 +1773,6 @@ function buildLocalPodcast(req: LocalPodcastRequest) {
   const targetSeconds = hasCustomDuration
     ? clampNumber(requestedDurationSeconds, MIN_CUSTOM_DURATION_SECONDS, MAX_CUSTOM_DURATION_SECONDS)
     : DURATION_TARGET_SECONDS[fallbackDuration];
-  const capSeconds = hasCustomDuration
-    ? Math.min(MAX_CUSTOM_DURATION_SECONDS, targetSeconds + 30)
-    : DURATION_CAP_SECONDS[fallbackDuration];
   const duration = getDurationMode(targetSeconds, fallbackDuration);
   const durationLabel = formatDurationLabel(targetSeconds);
   const musicMood = cleanText(req.musicMood, "Pure Speech");
@@ -1023,16 +1780,24 @@ function buildLocalPodcast(req: LocalPodcastRequest) {
   const speakers = normalizeSpeakers(req.speakers, req.numSpeakers);
   const imageContext = getImageContext(req.promptImages);
   const voiceContext = getVoiceReferenceContext(req.voiceReferences);
-  const maxLines = Math.min(1200, Math.max(24, Math.ceil(capSeconds / 7)));
-  const script = [];
+  const researchSources = await fetchTopicResearch(topic);
+  const episodeFormat = chooseEpisodeFormat(topic, researchSources, targetSeconds);
+  const maxLines = Math.min(1400, Math.max(speakers.length * 3, Math.ceil(targetSeconds / 6) + speakers.length * 3));
+  const script: Array<{
+    id: string;
+    speakerName: string;
+    dialogue: string;
+    soundEffect: string | null;
+    durationSeconds: number;
+    estimatedStartSeconds: number;
+  }> = [];
   let cursor = 0;
   let index = 0;
 
   while ((cursor < targetSeconds || script.length < speakers.length * 3) && index < maxLines) {
     const speaker = speakers[index % speakers.length];
-    const dialogue = getLineTemplate(index, topic, imageContext, musicMood, duration);
+    const dialogue = getLineTemplate(index, topic, imageContext, musicMood, duration, researchSources, episodeFormat);
     const durationSeconds = estimateSeconds(dialogue);
-    if (cursor + durationSeconds > capSeconds) break;
     script.push({
       id: String(index + 1),
       speakerName: speaker.name,
@@ -1040,7 +1805,7 @@ function buildLocalPodcast(req: LocalPodcastRequest) {
       soundEffect:
         index === 0
           ? "intro music fades under the host"
-          : cursor + durationSeconds >= targetSeconds || cursor + durationSeconds >= capSeconds - 15
+          : cursor + durationSeconds >= targetSeconds - 15
             ? "soft outro sting"
             : index % 18 === 0
               ? "brief reflective pause"
@@ -1051,46 +1816,31 @@ function buildLocalPodcast(req: LocalPodcastRequest) {
     cursor += durationSeconds;
     index += 1;
   }
+  cursor = fitScriptToTargetDuration(script, targetSeconds);
 
   const ratios = getChapterRatios(duration, targetSeconds);
-  const chapterTitles = [
-    "Cold Open",
-    "Set the Stakes",
-    imageContext ? "Visual Prompt Cues" : "Core Tension",
-    "Counterpoint",
-    "Practical Takeaways",
-    "Outro",
-  ];
-  const hourChapterTitles = [
-    "Cold Open",
-    "Origin Story",
-    "Current Landscape",
-    "Human Stakes",
-    "Technical Details",
-    "Money and Incentives",
-    "Creative Angle",
-    "Skeptical Read",
-    "Future Scenario",
-    "Practical Playbook",
-    "Listener Questions",
-    "Final Synthesis",
-  ];
-  const titles = duration === "hour" ? hourChapterTitles : chapterTitles;
+  const titles = episodeFormat.chapterTitles;
+  const sourceSummary = researchSources.length
+    ? ` Research sources: ${researchSources.map((source) => source.title).join("; ")}.`
+    : " Live research was unavailable, so claims are framed cautiously.";
+  const structureSummary = ` Structure: ${episodeFormat.title}.`;
 
   return {
     title: titleFromPrompt(topic),
-    tagline: `A ${durationLabel} conversational episode built from your prompt.`,
+    tagline: `A ${durationLabel} ${episodeFormat.title.toLowerCase()} episode built from your prompt and live sources.`,
     description:
       language === "English"
-        ? `A free, locally generated ECHO Studios script exploring ${shortText(topic, 150)}.${voiceContext ? ` Voice reference: ${voiceContext}.` : ""}`
-        : `A free, locally generated ECHO Studios script framed for ${language} production and exploring ${shortText(topic, 130)}.${voiceContext ? ` Voice reference: ${voiceContext}.` : ""}`,
+        ? `A free, locally generated ECHO Studios script exploring ${shortText(topic, 150)}.${structureSummary}${sourceSummary}${voiceContext ? ` Voice reference: ${voiceContext}.` : ""}`
+        : `A free, locally generated ECHO Studios script framed for ${language} production and exploring ${shortText(topic, 130)}.${structureSummary}${sourceSummary}${voiceContext ? ` Voice reference: ${voiceContext}.` : ""}`,
+    episodeFormat: episodeFormat.title,
     musicMood,
     speakers,
     chapters: ratios.map((ratio, index) => ({
-      title: titles[index] || `Chapter ${index + 1}`,
-      startSeconds: Math.round(cursor * ratio),
+      title: titles[index % titles.length] || `Chapter ${index + 1}`,
+      startSeconds: Math.round(targetSeconds * ratio),
     })),
     script,
+    researchSources,
   };
 }
 
@@ -1118,7 +1868,7 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
       res.json({
         voice,
         message: voice.provider === "chatterbox"
-          ? "Local clone reference is ready. Install Chatterbox if needed, then generate audio with Local Clone."
+          ? "Local voice reference is ready. Choose Chatterbox HD to generate reference-guided audio."
           : "ElevenLabs cloned voice is ready for Studio Quality audio.",
       });
     } catch (e: any) {
@@ -1129,9 +1879,9 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
     }
   });
 
-  app.post("/api/generate-podcast", (req, res) => {
+  app.post("/api/generate-podcast", async (req, res) => {
     try {
-      res.json(buildLocalPodcast(req.body || {}));
+      res.json(await buildLocalPodcast(req.body || {}));
     } catch (e: any) {
       console.error("ECHO Studios local generation error:", e);
       res.status(500).json({ error: e.message || "Unable to generate the podcast script." });
@@ -1197,6 +1947,36 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
     }
   });
 
+  app.get("/api/generated-audio/:id", (req, res) => {
+    const entry = generatedAudioCache.get(req.params.id);
+    if (!entry) return res.status(404).json({ error: "Generated audio has expired." });
+
+    const totalBytes = entry.audio.length;
+    const rangeHeader = req.headers.range;
+    res.setHeader("Content-Type", entry.mimeType);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
+      const start = match?.[1] ? Number(match[1]) : 0;
+      const requestedEnd = match?.[2] ? Number(match[2]) : totalBytes - 1;
+      const end = Math.min(totalBytes - 1, requestedEnd);
+      if (!Number.isFinite(start) || start < 0 || start > end || start >= totalBytes) {
+        res.status(416).setHeader("Content-Range", `bytes */${totalBytes}`);
+        return res.end();
+      }
+
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${totalBytes}`);
+      res.setHeader("Content-Length", end - start + 1);
+      return res.send(entry.audio.subarray(start, end + 1));
+    }
+
+    res.setHeader("Content-Length", totalBytes);
+    return res.send(entry.audio);
+  });
+
   app.post("/api/generate-audio", async (req, res) => {
     try {
       const text = buildAudioPreviewText(req.body || {});
@@ -1207,12 +1987,15 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
       const result = provider === "elevenlabs"
         ? await synthesizeWithElevenLabs(text, req.body?.voiceId, req.body?.modelId)
         : provider === "chatterbox"
-          ? await synthesizeWithChatterbox(text, req.body?.voiceReferences)
-          : await synthesizeWithPiper(text, req.body?.voiceId);
+          ? await synthesizeWithChatterbox(req.body || {})
+          : await synthesizeWithPiperCast(req.body || {});
+      const mimeType = provider === "elevenlabs" ? "audio/mpeg" : "audio/wav";
+      const audioUrl = storeGeneratedAudio(result.audio, mimeType);
       res.json({
         mode: provider,
-        mimeType: provider === "elevenlabs" ? "audio/mpeg" : "audio/wav",
-        ...result,
+        mimeType,
+        voice: result.voice,
+        audioUrl,
       });
     } catch (e: any) {
       res.status(501).json({

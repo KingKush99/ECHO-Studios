@@ -1,10 +1,33 @@
-import { type ChangeEvent, useRef, useState } from "react";
-import { CheckCircle2, Download, FileText, Image as ImageIcon, Loader2, Mic2, Settings2, Sparkles, UploadCloud, Wand2, X } from "lucide-react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
+import { CheckCircle2, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Mic2, Settings2, Sparkles, UploadCloud, Wand2, X } from "lucide-react";
 import { PRESET_TOPICS, HOSTER_PROFILES, AUDIO_MOODS, LANGUAGES } from "../presets";
-import { PodcastCover, PodcastMetadata, PromptImage, VoiceReference } from "../types";
+import { type PodcastCover, type PodcastMetadata, type PresetTopic, type PromptImage, type VoiceReference } from "../types";
 
 type CoverStyle = "signal" | "midnight" | "solar" | "editorial";
 type VoiceSourceType = "cloned" | "downloaded" | "third-party";
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  [index: number]: { transcript: string } | undefined;
+};
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: SpeechRecognitionResultLike | undefined;
+  };
+};
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
 const MIN_DURATION_SECONDS = 60;
 const MAX_DURATION_SECONDS = 7200;
@@ -22,6 +45,23 @@ const VOICE_SOURCE_OPTIONS: Array<{ id: VoiceSourceType; label: string }> = [
   { id: "third-party", label: "Third-party" },
 ];
 
+const DICTATION_LANGUAGE: Record<string, string> = {
+  English: "en-US",
+  Spanish: "es-ES",
+  French: "fr-FR",
+  German: "de-DE",
+  Japanese: "ja-JP",
+};
+
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") return null;
+  const speechWindow = window as typeof window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition || null;
+}
+
 function clampDurationSeconds(value: number) {
   return Math.max(MIN_DURATION_SECONDS, Math.min(MAX_DURATION_SECONDS, Math.round(value || MIN_DURATION_SECONDS)));
 }
@@ -31,6 +71,35 @@ function getDurationPreset(seconds: number): "short" | "medium" | "long" | "hour
   if (seconds >= 720) return "long";
   if (seconds >= 240) return "medium";
   return "short";
+}
+
+function hasPromptDetails(details: { audience: string; angle: string; questions: string; evidence: string }) {
+  return Boolean(details.audience.trim() || details.angle.trim() || details.questions.trim() || details.evidence.trim());
+}
+
+function isStructuredPrompt(value: string) {
+  return /\b(Core topic|Specific angle|Target listener|Questions to answer|Evidence to use):/i.test(value);
+}
+
+function buildSpecificPrompt(
+  baseTopic: string,
+  details: { audience: string; angle: string; questions: string; evidence: string },
+) {
+  const subject = baseTopic.trim() || "A focused research-backed podcast topic";
+  const angle = details.angle.trim() || `Find the most interesting tension, counterargument, and real-world stakes inside "${subject}".`;
+  const audience = details.audience.trim() || "Curious listeners who want a clear story, real evidence, and practical takeaways.";
+  const questions = details.questions.trim() || "What is misunderstood, what evidence matters, who is affected, and what should listeners rethink?";
+  const evidence = details.evidence.trim() || "Use real public research sources, recent reporting where available, historical context, concrete examples, and clear caveats.";
+
+  return [
+    `Core topic: ${subject}`,
+    `Specific angle: ${angle}`,
+    `Target listener: ${audience}`,
+    `Questions to answer: ${questions}`,
+    `Evidence to use: ${evidence}`,
+    "Format: build a podcast conversation with a strong opening question, sourced context, a skeptical counterpoint, examples, and a clear final takeaway.",
+    "Avoid: generic summaries, unsupported claims, vague hype, and repeating the same point in different words.",
+  ].join("\n");
 }
 
 function formatDurationLabel(seconds: number) {
@@ -303,6 +372,13 @@ export function CreateView({
   generatedPodcast?: PodcastMetadata | null;
 }) {
   const [topic, setTopic] = useState("");
+  const [promptAudience, setPromptAudience] = useState("");
+  const [promptAngle, setPromptAngle] = useState("");
+  const [promptQuestions, setPromptQuestions] = useState("");
+  const [promptEvidence, setPromptEvidence] = useState("");
+  const [isDictatingPrompt, setIsDictatingPrompt] = useState(false);
+  const [dictationPreview, setDictationPreview] = useState("");
+  const [dictationError, setDictationError] = useState<string | null>(null);
   const [durationSeconds, setDurationSeconds] = useState(3600);
   const [selectedHosts, setSelectedHosts] = useState<string[]>(["maya", "marcus"]);
   const [musicMood, setMusicMood] = useState(AUDIO_MOODS[0].id);
@@ -321,9 +397,132 @@ export function CreateView({
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const voiceInputRef = useRef<HTMLInputElement>(null);
+  const promptRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+
+  useEffect(() => {
+    return () => {
+      promptRecognitionRef.current?.abort();
+    };
+  }, []);
+
+  const getPromptDetails = () => ({
+    audience: promptAudience,
+    angle: promptAngle,
+    questions: promptQuestions,
+    evidence: promptEvidence,
+  });
+
+  const getGenerationPrompt = () => {
+    const details = getPromptDetails();
+    if (hasPromptDetails(details) && !isStructuredPrompt(topic)) {
+      return buildSpecificPrompt(topic, details);
+    }
+    return topic;
+  };
+
+  const fleshOutPrompt = () => {
+    const nextPrompt = buildSpecificPrompt(topic, getPromptDetails());
+    setTopic(nextPrompt);
+  };
+
+  const applyPresetPrompt = (preset: PresetTopic) => {
+    const angle = `Use "${preset.topic}" as a specific case study: ${preset.description}`;
+    const audience = "Curious listeners who want the concrete evidence, the counterargument, and why the story matters now.";
+    const questions = "What is the strongest claim, what would a skeptic say, what evidence supports it, and what does the listener take away?";
+    const evidence = "Use real research sources, historical context, named examples, and clear uncertainty where the facts are incomplete.";
+    setPromptAngle(angle);
+    setPromptAudience(audience);
+    setPromptQuestions(questions);
+    setPromptEvidence(evidence);
+    setTopic(buildSpecificPrompt(preset.topic, { audience, angle, questions, evidence }));
+  };
+
+  const getPromptMicrophonePermission = async () => {
+    if (!navigator.permissions?.query) return "prompt";
+    try {
+      const status = await navigator.permissions.query({ name: "microphone" as PermissionName });
+      return status.state;
+    } catch {
+      return "prompt";
+    }
+  };
+
+  const getDictationErrorMessage = (error?: string) => {
+    if (error === "not-allowed" || error === "service-not-allowed") {
+      return "Microphone permission is blocked. Use the site settings icon beside localhost to set Microphone to Allow, then reload and tap the mic again.";
+    }
+    if (error === "no-speech") return "I did not hear anything. Tap the mic and try speaking again.";
+    if (error === "audio-capture") return "No microphone was detected. Check the selected input device and try again.";
+    if (error === "network") return "Voice recognition could not reach the browser speech service. Try again or type the prompt.";
+    return "Voice input stopped. You can tap the mic again or type the prompt.";
+  };
+
+  const togglePromptDictation = async () => {
+    if (isDictatingPrompt) {
+      promptRecognitionRef.current?.stop();
+      return;
+    }
+
+    const SpeechRecognition = getSpeechRecognitionConstructor();
+    if (!SpeechRecognition) {
+      setDictationError("Voice prompt input is not supported in this browser.");
+      return;
+    }
+
+    setDictationError(null);
+    setDictationPreview("Preparing voice input...");
+    const microphonePermission = await getPromptMicrophonePermission();
+    if (microphonePermission === "denied") {
+      setDictationPreview("");
+      setDictationError("Microphone permission is blocked. Use the site settings icon beside localhost to set Microphone to Allow, then reload and tap the mic again.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    promptRecognitionRef.current = recognition;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = DICTATION_LANGUAGE[language] || "en-US";
+    recognition.onresult = (event) => {
+      let finalText = "";
+      let interimText = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result?.[0]?.transcript || "";
+        if (!transcript) continue;
+        if (result?.isFinal) finalText += ` ${transcript.trim()}`;
+        else interimText += ` ${transcript.trim()}`;
+      }
+
+      if (finalText.trim()) {
+        setTopic((current) => `${current.trim()} ${finalText.trim()}`.replace(/\s+/g, " ").trim());
+      }
+      setDictationPreview(interimText.trim());
+    };
+    recognition.onerror = (event) => {
+      setDictationError(getDictationErrorMessage(event.error));
+      setIsDictatingPrompt(false);
+    };
+    recognition.onend = () => {
+      setIsDictatingPrompt(false);
+      setDictationPreview("");
+      promptRecognitionRef.current = null;
+    };
+
+    try {
+      setDictationError(null);
+      setDictationPreview("");
+      setIsDictatingPrompt(true);
+      recognition.start();
+    } catch {
+      setIsDictatingPrompt(false);
+      setDictationError("Voice input could not start. Try again after allowing microphone access.");
+    }
+  };
 
   const handleGenerate = async () => {
-    if (!topic.trim()) {
+    const generationPrompt = getGenerationPrompt();
+    if (!generationPrompt.trim()) {
       setError("Please provide a topic.");
       return;
     }
@@ -362,7 +561,7 @@ export function CreateView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           engine: "free-local",
-          topic,
+          topic: generationPrompt,
           duration: getDurationPreset(durationSeconds),
           durationSeconds,
           numSpeakers: selectedProfiles.length,
@@ -396,11 +595,11 @@ export function CreateView({
       const data = await response.json();
       const generatedData: PodcastMetadata = {
         ...data,
-        sourcePrompt: topic,
+        sourcePrompt: generationPrompt,
         promptImages,
         voiceReferences: episodeVoiceReferences,
       };
-      const cover = generatePodcastCover(generatedData, topic || generatedData.title, coverStyle);
+      const cover = generatePodcastCover(generatedData, generationPrompt || generatedData.title, coverStyle);
       onGenerated({
         ...generatedData,
         coverArt: cover,
@@ -549,7 +748,7 @@ export function CreateView({
       };
       if (!nextVoice.id) throw new Error("The clone succeeded but no voice ID was returned.");
       setClonedVoice(nextVoice);
-      setVoiceCloneMessage(result.message || (nextVoice.provider === "elevenlabs" ? `${nextVoice.name} is ready for Studio Quality audio.` : `${nextVoice.name} is ready for Local Clone audio.`));
+      setVoiceCloneMessage(result.message || (nextVoice.provider === "elevenlabs" ? `${nextVoice.name} is ready for Studio Quality audio.` : `${nextVoice.name} is ready for Chatterbox HD audio.`));
     } catch (err: any) {
       setVoiceCloneMessage(err.message || "Voice cloning is not available.");
     } finally {
@@ -613,17 +812,68 @@ export function CreateView({
             <label className="text-xs font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
               <Wand2 className="w-3 h-3" /> Prompt
             </label>
-            <textarea
-              value={topic}
-              onChange={(e) => setTopic(e.target.value)}
-              placeholder="Describe the episode, angle, audience, and anything the hosts should focus on."
-              className="w-full bg-black/40 border border-white/10 rounded-xl p-4 text-white placeholder-gray-500 focus:outline-none focus:border-brand-500/50 transition-colors resize-none h-32 text-sm"
-            />
+            <div className="relative">
+              <textarea
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                placeholder="Describe the episode, angle, audience, and anything the hosts should focus on."
+                className="w-full bg-black/40 border border-white/10 rounded-xl p-4 pl-14 pb-12 text-white placeholder-gray-500 focus:outline-none focus:border-brand-500/50 transition-colors resize-none h-32 text-sm"
+              />
+              <button
+                onClick={togglePromptDictation}
+                className={`absolute bottom-3 left-3 flex h-8 w-8 items-center justify-center rounded-full border text-white shadow-[0_0_14px_rgba(99,102,241,0.25)] transition-colors ${isDictatingPrompt ? "border-red-400/40 bg-red-500 text-white" : "border-white/10 bg-white/10 hover:bg-white/15"}`}
+                aria-label={isDictatingPrompt ? "Stop voice prompt input" : "Speak prompt"}
+                title={isDictatingPrompt ? "Stop listening" : "Speak prompt"}
+              >
+                <Mic2 className="h-4 w-4" />
+              </button>
+            </div>
+            <div>
+              <button
+                onClick={fleshOutPrompt}
+                disabled={!topic.trim() && !hasPromptDetails(getPromptDetails())}
+                className="w-full rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-brand-500 disabled:cursor-not-allowed disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Wand2 className="h-4 w-4" />
+                Flesh Out Prompt
+              </button>
+            </div>
+            {(dictationPreview || dictationError) && (
+              <div className={`rounded-xl border px-3 py-2 text-xs ${dictationError ? "border-red-500/20 bg-red-500/10 text-red-100" : "border-brand-500/20 bg-brand-500/10 text-brand-100"}`}>
+                {dictationError || `Listening: ${dictationPreview}`}
+              </div>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <input
+                value={promptAudience}
+                onChange={(event) => setPromptAudience(event.target.value)}
+                placeholder="Audience, e.g. new founders, parents, hockey fans"
+                className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-white outline-none placeholder:text-gray-500 focus:border-brand-500/50"
+              />
+              <input
+                value={promptAngle}
+                onChange={(event) => setPromptAngle(event.target.value)}
+                placeholder="Specific angle or thesis"
+                className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-white outline-none placeholder:text-gray-500 focus:border-brand-500/50"
+              />
+              <input
+                value={promptQuestions}
+                onChange={(event) => setPromptQuestions(event.target.value)}
+                placeholder="Questions the episode must answer"
+                className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-white outline-none placeholder:text-gray-500 focus:border-brand-500/50"
+              />
+              <input
+                value={promptEvidence}
+                onChange={(event) => setPromptEvidence(event.target.value)}
+                placeholder="Evidence, examples, or people to include"
+                className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-white outline-none placeholder:text-gray-500 focus:border-brand-500/50"
+              />
+            </div>
             <div className="flex flex-wrap gap-2">
               {PRESET_TOPICS.map((preset) => (
                 <button
                   key={preset.category}
-                  onClick={() => setTopic(`${preset.topic} - ${preset.description}`)}
+                  onClick={() => applyPresetPrompt(preset)}
                   className="px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/5 text-xs text-gray-300 transition-colors"
                 >
                   {preset.emoji} {preset.category}
@@ -742,7 +992,7 @@ export function CreateView({
 
               <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 items-center">
                 <p className="text-xs leading-relaxed text-gray-400">
-                  Upload cloned, downloaded, or third-party voice files, then assign them to cast members below. With an ElevenLabs key the first cloned sample can become a hosted voice; without one it prepares a no-key Local Clone for Chatterbox.
+                  Upload cloned, downloaded, or third-party voice files, then assign them to cast members below. Chatterbox HD can use these references locally without an API key.
                 </p>
                 <button
                   onClick={cloneVoice}
@@ -888,7 +1138,7 @@ export function CreateView({
 
           <button
             onClick={handleGenerate}
-            disabled={isGenerating || !topic.trim() || selectedHosts.length === 0}
+            disabled={isGenerating || !getGenerationPrompt().trim() || selectedHosts.length === 0}
             className="w-full bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-3 rounded-xl transition-colors flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(99,102,241,0.3)]"
           >
             {isGenerating ? (
@@ -916,6 +1166,34 @@ export function CreateView({
           </div>
           <h2 className="text-2xl font-display font-medium text-white">{generatedPodcast.title}</h2>
           <p className="text-gray-400 text-sm">{generatedPodcast.tagline}</p>
+
+          {generatedPodcast.researchSources && generatedPodcast.researchSources.length > 0 && (
+            <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-bold text-emerald-100">
+                <FileText className="h-4 w-4" /> Research used
+              </div>
+              <div className="grid gap-2">
+                {generatedPodcast.researchSources.map((source) => (
+                  <a
+                    key={`${source.title}-${source.url}`}
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="group rounded-xl border border-white/10 bg-black/20 p-3 transition-colors hover:bg-white/5"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-bold text-white">{source.title}</div>
+                        <div className="mt-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200/70">{source.source}</div>
+                      </div>
+                      <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-emerald-200/60 transition-colors group-hover:text-emerald-100" />
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-emerald-100/70">{source.summary}</p>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4 space-y-4">
             <div className="flex flex-col sm:flex-row gap-4">
@@ -975,8 +1253,8 @@ export function CreateView({
               </div>
               <p className="mt-1 text-xs leading-relaxed text-emerald-100/75">
                 {generatedPodcast.voiceReferences[0].clonedVoiceId
-                  ? `${generatedPodcast.voiceReferences[0].clonedVoiceName || "Cloned voice"} is selected for ${generatedPodcast.voiceReferences[0].cloneProvider === "elevenlabs" ? "ElevenLabs Studio Quality" : "Local Clone"} audio.`
-                  : "The uploaded voice sample is saved with this draft. Prepare the clone, then generate audio with Local Clone or ElevenLabs."}
+                  ? `${generatedPodcast.voiceReferences[0].clonedVoiceName || "Cloned voice"} is selected for ${generatedPodcast.voiceReferences[0].cloneProvider === "elevenlabs" ? "ElevenLabs Studio Quality" : "Chatterbox HD"} audio.`
+                  : "The uploaded voice sample is saved with this draft. Generate with Chatterbox HD for a local reference-guided voice."}
               </p>
             </div>
           )}

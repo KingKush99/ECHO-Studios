@@ -31,6 +31,11 @@ type AudioEngineStatus = {
   chatterboxInstallCommand: string;
 };
 type AudioProvider = "elevenlabs" | "chatterbox" | "piper";
+type PlaybackChunk = {
+  startTime: number;
+  endTime: number;
+  nextLineIndex: number;
+};
 const PODCAST_LIBRARY_STORAGE_KEY = "echo.podcastLibrary.v1";
 
 function getPodcastDuration(data: PodcastMetadata | null) {
@@ -68,6 +73,7 @@ export default function App() {
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [preferredVoiceURI, setPreferredVoiceURI] = useState("");
   const [voiceMode, setVoiceMode] = useState<VoiceMode>("narrator");
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [audioEngine, setAudioEngine] = useState<AudioEngineStatus | null>(null);
   const [audioProvider, setAudioProvider] = useState<AudioProvider>("elevenlabs");
   const [selectedNeuralVoice, setSelectedNeuralVoice] = useState("");
@@ -78,6 +84,11 @@ export default function App() {
 
   const podcastDataRef = useRef<PodcastMetadata | null>(null);
   const neuralAudioRef = useRef<HTMLAudioElement | null>(null);
+  const autoPlayNeuralAudioRef = useRef(false);
+  const isGeneratingNeuralAudioRef = useRef(false);
+  const playbackChunkRef = useRef<PlaybackChunk | null>(null);
+  const continueChunkPlaybackRef = useRef(false);
+  const playbackRateRef = useRef(1);
   const speechStatusRef = useRef<SpeechStatus>("idle");
   const currentTimeRef = useRef(0);
   const durationRef = useRef(0);
@@ -129,7 +140,7 @@ export default function App() {
         if (data.voices?.[0]?.id) setSelectedNeuralVoice(data.voices[0].id);
         if (data.elevenLabsVoices?.[0]?.id) setSelectedElevenVoice(data.elevenLabsVoices[0].id);
         else if (data.elevenLabsDefaultVoiceId) setSelectedElevenVoice(data.elevenLabsDefaultVoiceId);
-        if (!data.elevenLabsAvailable) setAudioProvider("piper");
+        setAudioProvider(data.elevenLabsAvailable ? "elevenlabs" : data.chatterboxAvailable ? "chatterbox" : "piper");
       })
       .catch(() => {
         setAudioEngine({
@@ -153,8 +164,51 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    playbackRateRef.current = playbackRate;
+    if (neuralAudioRef.current) {
+      neuralAudioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate, neuralAudioUrl]);
+
+  useEffect(() => {
+    if (!neuralAudioUrl) return;
+    neuralAudioRef.current?.load();
+  }, [neuralAudioUrl]);
+
+  useEffect(() => {
+    if (!neuralAudioUrl || !autoPlayNeuralAudioRef.current) return;
+
+    const audio = neuralAudioRef.current;
+    if (!audio) return;
+
+    autoPlayNeuralAudioRef.current = false;
+    const playAudio = () => {
+      void audio.play().catch(() => {
+        setSpeechError("HD audio is ready. Press Play to start it.");
+      });
+    };
+
+    if (audio.readyState >= 2) {
+      playAudio();
+      return;
+    }
+
+    audio.addEventListener("canplay", playAudio, { once: true });
+    return () => audio.removeEventListener("canplay", playAudio);
+  }, [neuralAudioUrl]);
+
+  function getLineIndexAtTime(data: PodcastMetadata | null, seconds: number) {
+    if (!data || data.script.length === 0) return 0;
+    return data.script.reduce((selectedIndex, line, index) => (line.estimatedStartSeconds <= seconds ? index : selectedIndex), 0);
+  }
+
   function setPlaybackTime(value: number) {
     const clamped = Math.max(0, Math.min(value, durationRef.current || value));
+    const nextLineIndex = getLineIndexAtTime(podcastDataRef.current, clamped);
+    if (nextLineIndex !== currentLineIndexRef.current) {
+      setActiveLine(nextLineIndex);
+    }
     currentTimeRef.current = clamped;
     setCurrentTime(clamped);
   }
@@ -177,9 +231,11 @@ export default function App() {
   }
 
   function revokeNeuralAudio() {
-    if (neuralAudioUrl) URL.revokeObjectURL(neuralAudioUrl);
+    if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
     setNeuralAudioUrl(null);
     setNeuralAudioError(null);
+    playbackChunkRef.current = null;
+    continueChunkPlaybackRef.current = false;
   }
 
   function clearLineDelay() {
@@ -196,7 +252,7 @@ export default function App() {
     setPlaybackTime(startTime);
 
     progressTimerRef.current = window.setInterval(() => {
-      const elapsed = (Date.now() - startedAt) / 1000;
+      const elapsed = ((Date.now() - startedAt) / 1000) * playbackRateRef.current;
       setPlaybackTime(Math.min(durationRef.current, startTime + elapsed));
     }, 250);
   }
@@ -223,34 +279,51 @@ export default function App() {
     if (voices.length === 0) return null;
 
     const preferredVoice = preferredVoiceURI ? voices.find((voice) => voice.voiceURI === preferredVoiceURI) : null;
-    if (preferredVoice && voiceMode === "narrator") return preferredVoice;
+    const data = podcastDataRef.current;
+    const speaker = data?.speakers.find((item) => item.name === speakerName);
+    const speakerIndex = Math.max(0, data?.speakers.findIndex((item) => item.name === speakerName) ?? 0);
+    if (preferredVoice && voiceMode === "narrator" && speakerIndex === 0) return preferredVoice;
 
     const englishVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith("en"));
     const usableVoices = englishVoices.length > 0 ? englishVoices : voices;
-    const rankedVoices = [...usableVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a));
+    const speakerStyle = `${speaker?.gender || ""} ${speaker?.style || ""}`.toLowerCase();
+    const rankedVoices = [...usableVoices].sort((a, b) => {
+      const aName = `${a.name} ${a.voiceURI}`.toLowerCase();
+      const bName = `${b.name} ${b.voiceURI}`.toLowerCase();
+      const voiceFit = (name: string) => {
+        let fit = 0;
+        if (speakerStyle.includes("female") && /(jenny|aria|samantha|sonia|libby|zira|amy|female)/.test(name)) fit += 24;
+        if (speakerStyle.includes("male") && /(guy|ryan|david|daniel|mark|male)/.test(name)) fit += 24;
+        if (speakerStyle.includes("skeptical") && /(david|guy|mark|ryan)/.test(name)) fit += 12;
+        if (speakerStyle.includes("enthusiastic") && /(jenny|aria|amy|samantha)/.test(name)) fit += 12;
+        if (speakerStyle.includes("intellectual") && /(daniel|david|ryan|guy)/.test(name)) fit += 10;
+        return fit;
+      };
+      return scoreVoice(b) + voiceFit(bName) - (scoreVoice(a) + voiceFit(aName));
+    });
 
     if (preferredVoice && voiceMode === "cast") {
       const otherVoices = rankedVoices.filter((voice) => voice.voiceURI !== preferredVoice.voiceURI);
       rankedVoices.splice(0, rankedVoices.length, preferredVoice, ...otherVoices);
     }
 
-    const topVoices = rankedVoices.slice(0, Math.min(4, rankedVoices.length));
-    return topVoices[getHash(speakerName) % topVoices.length];
+    const topVoices = rankedVoices.slice(0, Math.min(Math.max(4, data?.speakers.length || 2), rankedVoices.length));
+    return topVoices[(speakerIndex + getHash(speakerName)) % topVoices.length];
   }
 
   function getSpeechSettings(speakerName: string, lineIndex: number) {
     const speaker = podcastDataRef.current?.speakers.find((item) => item.name === speakerName);
     const hash = getHash(`${speakerName}-${lineIndex}`);
-    const rateVariation = (hash % 7) * 0.01;
-    const pitchVariation = ((hash % 5) - 2) * 0.025;
+    const rateVariation = ((hash % 9) - 4) * 0.026;
+    const pitchVariation = ((hash % 11) - 5) * 0.075;
     const style = speaker?.style.toLowerCase() || "";
 
-    const baseRate = voiceMode === "narrator" ? 0.88 : style.includes("calm") || style.includes("philosophical") ? 0.88 : style.includes("enthusiastic") ? 0.94 : 0.91;
-    const basePitch = voiceMode === "narrator" ? 0.98 : speaker?.gender === "male" ? 0.9 : speaker?.gender === "female" ? 1.04 : 0.98;
+    const baseRate = style.includes("calm") || style.includes("philosophical") ? 0.82 : style.includes("enthusiastic") ? 1.04 : style.includes("skeptical") ? 0.88 : 0.94;
+    const basePitch = speaker?.gender === "male" ? 0.74 : speaker?.gender === "female" ? 1.2 : style.includes("philosophical") ? 0.9 : 1;
 
     return {
-      rate: Math.min(0.98, baseRate + rateVariation),
-      pitch: Math.min(1.08, Math.max(0.88, basePitch + pitchVariation)),
+      rate: Math.min(1.8, Math.max(0.5, (baseRate + rateVariation) * playbackRateRef.current)),
+      pitch: Math.min(1.45, Math.max(0.55, basePitch + pitchVariation)),
     };
   }
 
@@ -374,6 +447,8 @@ export default function App() {
     stopProgressTimer();
     setPlaybackStatus("idle");
     if (resetProgress) {
+      playbackChunkRef.current = null;
+      continueChunkPlaybackRef.current = false;
       setPlaybackTime(0);
       setActiveLine(0);
     }
@@ -382,6 +457,7 @@ export default function App() {
   function handleGenerated(data: PodcastMetadata) {
     cancelSpeech(true);
     revokeNeuralAudio();
+    podcastDataRef.current = data;
     setPodcastData(data);
     const clonedReference = data.voiceReferences?.find((reference) => reference.clonedVoiceId);
     if (clonedReference?.clonedVoiceId) {
@@ -418,6 +494,14 @@ export default function App() {
     currentLineIndexRef.current = 0;
     setIsPodcastPlayerOpen(true);
     setActiveTab("create");
+
+    if (audioEngine?.piperAvailable) {
+      continueChunkPlaybackRef.current = false;
+      setAudioProvider("piper");
+      window.setTimeout(() => {
+        void generatePiperPlaybackChunk(0);
+      }, 0);
+    }
   }
 
   function handlePodcastUpdated(data: PodcastMetadata) {
@@ -429,24 +513,64 @@ export default function App() {
   }
 
   function closePodcastPlayer() {
+    autoPlayNeuralAudioRef.current = false;
     cancelSpeech(true);
     setIsPodcastPlayerOpen(false);
   }
 
+  function canGenerateHighQualityAudio(data: PodcastMetadata | null) {
+    if (!data || !audioEngine) return false;
+    if (audioProvider === "elevenlabs") return audioEngine.elevenLabsAvailable;
+    if (audioProvider === "chatterbox") return audioEngine.chatterboxAvailable;
+    return audioEngine.piperAvailable;
+  }
+
+  function changePlaybackRate(value: number) {
+    const nextRate = Math.min(2, Math.max(0.5, value));
+    playbackRateRef.current = nextRate;
+    setPlaybackRate(nextRate);
+
+    if (neuralAudioRef.current) {
+      neuralAudioRef.current.playbackRate = nextRate;
+      return;
+    }
+
+    if (speechSupported && speechStatusRef.current === "playing") {
+      startSpeechAtLine(currentLineIndexRef.current);
+    }
+  }
+
   function togglePlay() {
     if (!podcastDataRef.current) return;
+    if (isGeneratingNeuralAudioRef.current) return;
 
     if (neuralAudioUrl && neuralAudioRef.current) {
       if (speechStatusRef.current === "playing") {
+        continueChunkPlaybackRef.current = false;
         neuralAudioRef.current.pause();
       } else {
-        neuralAudioRef.current.play();
+        continueChunkPlaybackRef.current = true;
+        void neuralAudioRef.current.play().catch(() => {
+          setSpeechError("Audio could not start. Press Play again or regenerate the audio.");
+        });
       }
       return;
     }
 
+    if (audioEngine?.piperAvailable) {
+      continueChunkPlaybackRef.current = true;
+      setAudioProvider("piper");
+      void generatePiperPlaybackChunk(currentLineIndexRef.current);
+      return;
+    }
+
     if (!speechSupported) {
-      setSpeechError("This browser does not support built-in speech playback.");
+      if (canGenerateHighQualityAudio(podcastDataRef.current)) {
+        autoPlayNeuralAudioRef.current = true;
+        void generateNeuralPreview();
+      } else {
+        setSpeechError("This browser cannot play the fallback speech voice. Generate HD Audio first.");
+      }
       return;
     }
 
@@ -479,20 +603,44 @@ export default function App() {
     startSpeechAtLine(currentLineIndexRef.current);
   }
 
-  function seekRelative(seconds: number) {
-    if (neuralAudioUrl && neuralAudioRef.current) {
-      const nextTime = Math.max(0, Math.min(neuralAudioRef.current.duration || 0, neuralAudioRef.current.currentTime + seconds));
-      neuralAudioRef.current.currentTime = nextTime;
-      setPlaybackTime(nextTime);
-      return;
-    }
-
+  function seekTo(seconds: number) {
     const data = podcastDataRef.current;
     if (!data || data.script.length === 0) return;
 
-    const targetTime = Math.max(0, Math.min(durationRef.current, currentTimeRef.current + seconds));
-    const targetIndex = data.script.reduce((selectedIndex, line, index) => (line.estimatedStartSeconds <= targetTime ? index : selectedIndex), 0);
+    const targetTime = Math.max(0, Math.min(durationRef.current, seconds));
+    const targetIndex = getLineIndexAtTime(data, targetTime);
     const wasPlaying = speechStatusRef.current === "playing";
+
+    if (neuralAudioUrl && neuralAudioRef.current) {
+      const playbackChunk = playbackChunkRef.current;
+      if (playbackChunk) {
+        const withinLoadedChunk = targetTime >= playbackChunk.startTime && targetTime <= playbackChunk.endTime;
+        if (withinLoadedChunk) {
+          neuralAudioRef.current.currentTime = Math.max(0, targetTime - playbackChunk.startTime);
+          setPlaybackTime(targetTime);
+          setActiveLine(targetIndex);
+          return;
+        }
+
+        neuralAudioRef.current.pause();
+        if (neuralAudioUrl.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
+        setNeuralAudioUrl(null);
+        playbackChunkRef.current = null;
+        setPlaybackTime(targetTime);
+        setActiveLine(targetIndex);
+        if (wasPlaying) {
+          continueChunkPlaybackRef.current = true;
+          void generatePiperPlaybackChunk(targetIndex);
+        }
+        return;
+      }
+
+      const audioDuration = Number.isFinite(neuralAudioRef.current.duration) ? neuralAudioRef.current.duration : durationRef.current;
+      neuralAudioRef.current.currentTime = Math.max(0, Math.min(audioDuration || durationRef.current, targetTime));
+      setPlaybackTime(targetTime);
+      setActiveLine(targetIndex);
+      return;
+    }
 
     playbackSessionRef.current += 1;
     if (speechSupported) {
@@ -502,7 +650,7 @@ export default function App() {
     pendingLineIndexRef.current = null;
     stopProgressTimer();
     setActiveLine(targetIndex);
-    setPlaybackTime(data.script[targetIndex]?.estimatedStartSeconds || 0);
+    setPlaybackTime(targetTime);
     setPlaybackStatus("idle");
 
     if (wasPlaying) {
@@ -510,12 +658,111 @@ export default function App() {
     }
   }
 
-  async function generateNeuralPreview() {
-    const data = podcastDataRef.current;
-    if (!data) return;
+  function seekRelative(seconds: number) {
+    seekTo(currentTimeRef.current + seconds);
+  }
 
+  async function generatePiperPlaybackChunk(startLineIndex: number) {
+    const data = podcastDataRef.current;
+    if (!data || !audioEngine?.piperAvailable || isGeneratingNeuralAudioRef.current) return;
+
+    const boundedStartIndex = Math.max(0, Math.min(startLineIndex, data.script.length - 1));
+    let nextLineIndex = boundedStartIndex;
+    let coveredSeconds = 0;
+    const targetChunkSeconds = 35;
+
+    while (nextLineIndex < data.script.length) {
+      const lineSeconds = Math.max(1, data.script[nextLineIndex].durationSeconds);
+      if (nextLineIndex > boundedStartIndex && coveredSeconds + lineSeconds > targetChunkSeconds) break;
+      coveredSeconds += lineSeconds;
+      nextLineIndex += 1;
+    }
+
+    const chunkScript = data.script.slice(boundedStartIndex, nextLineIndex);
+    if (chunkScript.length === 0) return;
+    const startTime = chunkScript[0].estimatedStartSeconds;
+    const lastLine = chunkScript[chunkScript.length - 1];
+    const endTime = lastLine.estimatedStartSeconds + lastLine.durationSeconds;
+
+    isGeneratingNeuralAudioRef.current = true;
     setIsGeneratingNeuralAudio(true);
     setNeuralAudioError(null);
+    setSpeechError(null);
+    cancelSpeech(false);
+
+    try {
+      const response = await fetch("/api/generate-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          script: chunkScript,
+          speakers: data.speakers,
+          maxSeconds: Math.ceil(coveredSeconds),
+          provider: "piper",
+          voiceId: selectedNeuralVoice,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Fast playback audio failed.");
+
+      if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
+      const nextAudioUrl = result.audioUrl || (() => {
+        const buffer = Uint8Array.from(atob(result.audio), (char) => char.charCodeAt(0));
+        return URL.createObjectURL(new Blob([buffer], { type: result.mimeType || "audio/wav" }));
+      })();
+      playbackChunkRef.current = { startTime, endTime, nextLineIndex };
+      autoPlayNeuralAudioRef.current = continueChunkPlaybackRef.current;
+      setNeuralAudioUrl(nextAudioUrl);
+      setPlaybackTime(startTime);
+      setActiveLine(boundedStartIndex);
+      setPlaybackStatus("idle");
+      setIsPodcastPlayerOpen(true);
+    } catch (error: any) {
+      continueChunkPlaybackRef.current = false;
+      setNeuralAudioError(error.message || "Fast playback audio is not available.");
+      setSpeechError("Playback audio could not be prepared. Open Audio Settings and try again.");
+    } finally {
+      isGeneratingNeuralAudioRef.current = false;
+      setIsGeneratingNeuralAudio(false);
+    }
+  }
+
+  function handleNeuralAudioEnded() {
+    const playbackChunk = playbackChunkRef.current;
+    if (!playbackChunk) {
+      setPlaybackStatus("idle");
+      return;
+    }
+
+    const shouldContinue = continueChunkPlaybackRef.current;
+    const data = podcastDataRef.current;
+    setPlaybackTime(playbackChunk.endTime);
+    setPlaybackStatus("idle");
+
+    if (data && playbackChunk.nextLineIndex < data.script.length) {
+      setActiveLine(playbackChunk.nextLineIndex);
+      if (shouldContinue) {
+        void generatePiperPlaybackChunk(playbackChunk.nextLineIndex);
+        return;
+      }
+    }
+
+    if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
+    setNeuralAudioUrl(null);
+    playbackChunkRef.current = null;
+  }
+
+  async function generateNeuralPreview() {
+    const data = podcastDataRef.current;
+    if (!data || isGeneratingNeuralAudioRef.current) return;
+
+    isGeneratingNeuralAudioRef.current = true;
+    playbackChunkRef.current = null;
+    continueChunkPlaybackRef.current = false;
+    autoPlayNeuralAudioRef.current = false;
+    setIsGeneratingNeuralAudio(true);
+    setNeuralAudioError(null);
+    setSpeechError(null);
     cancelSpeech(false);
 
     try {
@@ -525,7 +772,7 @@ export default function App() {
         body: JSON.stringify({
           script: data.script,
           speakers: data.speakers,
-          maxSeconds: 300,
+          maxSeconds: Math.ceil(getPodcastDuration(data)),
           provider: audioProvider,
           voiceId: audioProvider === "elevenlabs" ? selectedElevenVoice : selectedNeuralVoice,
           modelId: audioEngine?.elevenLabsModelId,
@@ -535,19 +782,22 @@ export default function App() {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Neural TTS failed.");
 
-      if (neuralAudioUrl) URL.revokeObjectURL(neuralAudioUrl);
-      const buffer = Uint8Array.from(atob(result.audio), (char) => char.charCodeAt(0));
-      const blob = new Blob([buffer], { type: result.mimeType || "audio/wav" });
-      const url = URL.createObjectURL(blob);
+      if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
+      const url = result.audioUrl || (() => {
+        const buffer = Uint8Array.from(atob(result.audio), (char) => char.charCodeAt(0));
+        return URL.createObjectURL(new Blob([buffer], { type: result.mimeType || "audio/wav" }));
+      })();
       setNeuralAudioUrl(url);
       setPlaybackTime(0);
       setPlaybackStatus("idle");
       setIsPodcastPlayerOpen(true);
     } catch (error: any) {
+      autoPlayNeuralAudioRef.current = false;
       setNeuralAudioError(error.message || "Neural TTS is not available.");
       const availabilityKey = audioProvider === "elevenlabs" ? "elevenLabsAvailable" : audioProvider === "chatterbox" ? "chatterboxAvailable" : "piperAvailable";
       setAudioEngine((current) => current ? { ...current, [availabilityKey]: false } : current);
     } finally {
+      isGeneratingNeuralAudioRef.current = false;
       setIsGeneratingNeuralAudio(false);
     }
   }
@@ -618,13 +868,24 @@ export default function App() {
         <audio
           ref={neuralAudioRef}
           src={neuralAudioUrl}
+          preload="auto"
+          playsInline
           onPlay={() => setPlaybackStatus("playing")}
           onPause={() => setPlaybackStatus("paused")}
-          onEnded={() => setPlaybackStatus("idle")}
-          onTimeUpdate={(event) => setPlaybackTime(event.currentTarget.currentTime)}
+          onError={(event) => {
+            const mediaError = event.currentTarget.error;
+            setSpeechError(mediaError?.message || "The generated audio could not be loaded.");
+          }}
+          onEnded={handleNeuralAudioEnded}
+          onTimeUpdate={(event) => {
+            const playbackChunk = playbackChunkRef.current;
+            setPlaybackTime((playbackChunk?.startTime || 0) + event.currentTarget.currentTime);
+          }}
           onLoadedMetadata={(event) => {
-            durationRef.current = event.currentTarget.duration;
-            setDuration(event.currentTarget.duration);
+            event.currentTarget.playbackRate = playbackRateRef.current;
+            const episodeDuration = getPodcastDuration(podcastDataRef.current);
+            durationRef.current = episodeDuration;
+            setDuration(episodeDuration);
           }}
         />
       )}
@@ -636,31 +897,34 @@ export default function App() {
         speechSupported={speechSupported}
         onPlayToggle={togglePlay}
         onSeekRelative={seekRelative}
-      currentTime={currentTime}
-      duration={duration}
-      currentLineIndex={currentLineIndex}
-      voices={availableVoices.map((voice) => ({
-        name: voice.name,
-        lang: voice.lang,
-        voiceURI: voice.voiceURI,
-        score: scoreVoice(voice),
-      }))}
-      preferredVoiceURI={preferredVoiceURI}
-      voiceMode={voiceMode}
-      onVoiceChange={setPreferredVoiceURI}
-      onVoiceModeChange={setVoiceMode}
-      audioEngine={audioEngine}
-      audioProvider={audioProvider}
-      selectedNeuralVoice={selectedNeuralVoice}
-      selectedElevenVoice={selectedElevenVoice}
-      neuralAudioAvailable={!!neuralAudioUrl}
-      isGeneratingNeuralAudio={isGeneratingNeuralAudio}
-      neuralAudioError={neuralAudioError}
-      onAudioProviderChange={setAudioProvider}
-      onNeuralVoiceChange={setSelectedNeuralVoice}
-      onElevenVoiceChange={setSelectedElevenVoice}
-      onGenerateNeuralPreview={generateNeuralPreview}
-      onClose={closePodcastPlayer}
+        onSeekTo={seekTo}
+        playbackRate={playbackRate}
+        onPlaybackRateChange={changePlaybackRate}
+        currentTime={currentTime}
+        duration={duration}
+        currentLineIndex={currentLineIndex}
+        voices={availableVoices.map((voice) => ({
+          name: voice.name,
+          lang: voice.lang,
+          voiceURI: voice.voiceURI,
+          score: scoreVoice(voice),
+        }))}
+        preferredVoiceURI={preferredVoiceURI}
+        voiceMode={voiceMode}
+        onVoiceChange={setPreferredVoiceURI}
+        onVoiceModeChange={setVoiceMode}
+        audioEngine={audioEngine}
+        audioProvider={audioProvider}
+        selectedNeuralVoice={selectedNeuralVoice}
+        selectedElevenVoice={selectedElevenVoice}
+        neuralAudioAvailable={!!neuralAudioUrl}
+        isGeneratingNeuralAudio={isGeneratingNeuralAudio}
+        neuralAudioError={neuralAudioError}
+        onAudioProviderChange={setAudioProvider}
+        onNeuralVoiceChange={setSelectedNeuralVoice}
+        onElevenVoiceChange={setSelectedElevenVoice}
+        onGenerateNeuralPreview={generateNeuralPreview}
+        onClose={closePodcastPlayer}
       />
 
       <nav className="fixed bottom-0 left-0 w-full z-50 bg-[#0c0d21]/90 backdrop-blur-xl border-t border-white/10 pb-safe pt-2">

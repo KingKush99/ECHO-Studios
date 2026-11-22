@@ -363,25 +363,30 @@ export function PodcastPlayer({
                 Audio Settings
               </summary>
               <div className="mt-4 grid grid-cols-1 gap-4">
-                <div className="grid grid-cols-3 overflow-hidden rounded-xl border border-white/10 bg-black/30">
-                  <button
-                    onClick={() => onAudioProviderChange("elevenlabs")}
-                    className={`px-3 py-2 text-xs font-semibold transition-colors ${audioProvider === "elevenlabs" ? "bg-emerald-500/30 text-white" : "text-gray-400 hover:text-white"}`}
-                  >
-                    Studio Quality
-                  </button>
+                <div className={`grid ${elevenLabsAvailable ? "grid-cols-3" : "grid-cols-2"} overflow-hidden rounded-xl border border-white/10 bg-black/30`}>
                   <button
                     onClick={() => onAudioProviderChange("chatterbox")}
-                    className={`border-l border-white/10 px-3 py-2 text-xs font-semibold transition-colors ${audioProvider === "chatterbox" ? "bg-pink-500/30 text-white" : "text-gray-400 hover:text-white"}`}
+                    disabled={isGeneratingNeuralAudio}
+                    className={`px-3 py-2 text-xs font-semibold transition-colors ${audioProvider === "chatterbox" ? "bg-pink-500/30 text-white" : "text-gray-400 hover:text-white"}`}
                   >
                     Chatterbox HD
                   </button>
                   <button
                     onClick={() => onAudioProviderChange("piper")}
+                    disabled={isGeneratingNeuralAudio}
                     className={`border-l border-white/10 px-3 py-2 text-xs font-semibold transition-colors ${audioProvider === "piper" ? "bg-brand-500/30 text-white" : "text-gray-400 hover:text-white"}`}
                   >
                     Piper Cast
                   </button>
+                  {elevenLabsAvailable && (
+                    <button
+                      onClick={() => onAudioProviderChange("elevenlabs")}
+                      disabled={isGeneratingNeuralAudio}
+                      className={`border-l border-white/10 px-3 py-2 text-xs font-semibold transition-colors ${audioProvider === "elevenlabs" ? "bg-emerald-500/30 text-white" : "text-gray-400 hover:text-white"}`}
+                    >
+                      ElevenLabs
+                    </button>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_auto]">
@@ -398,15 +403,14 @@ export function PodcastPlayer({
                             ? neuralAudioAvailable
                               ? "Chatterbox HD audio loaded. Play now uses the natural local model."
                               : hasVoiceReference
-                                ? `Chatterbox is ready to generate a no-key cast sample using ${voiceReferenceName}.`
+                                ? `Chatterbox is ready to use your local voice reference ${voiceReferenceName}.`
                                 : "Chatterbox is ready with its built-in natural voice. Add voice references in Create for custom cast voices."
                             : `Install Chatterbox HD with ${audioEngine?.chatterboxInstallCommand || ".\\install-chatterbox.ps1"}.`
                           : piperAvailable
                             ? neuralAudioAvailable
                               ? "Piper Cast audio loaded. Play now uses stitched local voices instead of browser speech."
                               : "Piper Cast is installed. Press Play or Generate HD Audio to synthesize separate local voices for the hosts."
-                            : `Browser voices are robotic here. Install Piper with ${audioEngine?.installCommand || ".\\install-piper.ps1"} or add ELEVENLABS_API_KEY.`}
-                      {audioProvider === "elevenlabs" && <span className="mt-1 block text-emerald-100/80">This is the path that can match ElevenLabs quality.</span>}
+                            : `Install Piper with ${audioEngine?.installCommand || ".\\install-piper.ps1"} for local cast voices.`}
                       {audioProvider === "chatterbox" && <span className="mt-1 block text-pink-100/80">This uses a local open-source model. No API key is required, but generation can be slow.</span>}
                       {neuralAudioError && <span className="mt-1 block text-red-100">{neuralAudioError}</span>}
                     </div>

@@ -1341,24 +1341,25 @@ function extensionFromMimeType(mimeType: string) {
   return ".wav";
 }
 
-function compactChatterboxSegments(segments: AudioSegment[], maxCharacters = 1400, maxSegments = 18) {
-  const compacted: AudioSegment[] = [];
-  let usedCharacters = 0;
+function compactChatterboxSegments(segments: AudioSegment[]) {
+  const compacted: Pick<AudioSegment, "speakerName" | "text">[] = [];
+  const maxChunkChars = 360;
 
-  for (const segment of segments) {
-    if (usedCharacters >= maxCharacters || compacted.length >= maxSegments) break;
-    const remainingCharacters = maxCharacters - usedCharacters;
-    const text = segment.text.slice(0, remainingCharacters).trim();
-    if (!text) continue;
+  for (const { speakerName, text } of segments) {
+    let remaining = text;
+    while (remaining) {
+      const boundary = remaining.length > maxChunkChars ? remaining.lastIndexOf(" ", maxChunkChars) : remaining.length;
+      const end = boundary > 0 ? boundary : maxChunkChars;
+      const chunk = remaining.slice(0, end);
+      remaining = remaining.slice(end).trimStart();
 
-    const previous = compacted[compacted.length - 1];
-    if (previous?.speakerName === segment.speakerName && previous.text.length + text.length <= 360) {
-      previous.text = `${previous.text} ${text}`;
-      previous.durationSeconds += segment.durationSeconds;
-    } else {
-      compacted.push({ ...segment, text });
+      const previous = compacted.at(-1);
+      if (previous?.speakerName === speakerName && previous.text.length + 1 + chunk.length <= maxChunkChars) {
+        previous.text = `${previous.text} ${chunk}`;
+      } else {
+        compacted.push({ speakerName, text: chunk });
+      }
     }
-    usedCharacters += text.length;
   }
 
   return compacted;
@@ -1410,25 +1411,25 @@ async function synthesizeWithChatterbox(req: AudioRequest) {
   const outFile = path.join(outDir, `${id}.wav`);
   const referenceFiles = new Map<VoiceReferenceRequest, string>();
 
-  for (const [index, reference] of references.entries()) {
-    const decoded = decodeReferenceAudio(reference);
-    const referenceFile = path.join(outDir, `${id}-reference-${index}${extensionFromMimeType(decoded.mimeType)}`);
-    await fsp.writeFile(referenceFile, decoded.buffer);
-    referenceFiles.set(reference, referenceFile);
-  }
-
-  const manifest = {
-    segments: segments.map((segment) => {
-      const reference = findChatterboxReferenceForSpeaker(segment.speakerName, req.speakers, references);
-      return {
-        text: segment.text,
-        voice: reference ? referenceFiles.get(reference) : undefined,
-      };
-    }),
-  };
-  await fsp.writeFile(manifestFile, JSON.stringify(manifest), "utf8");
-
   try {
+    for (const [index, reference] of references.entries()) {
+      const decoded = decodeReferenceAudio(reference);
+      const referenceFile = path.join(outDir, `${id}-reference-${index}${extensionFromMimeType(decoded.mimeType)}`);
+      referenceFiles.set(reference, referenceFile);
+      await fsp.writeFile(referenceFile, decoded.buffer);
+    }
+
+    const manifest = {
+      segments: segments.map((segment) => {
+        const reference = findChatterboxReferenceForSpeaker(segment.speakerName, req.speakers, references);
+        return {
+          text: segment.text,
+          voice: reference ? referenceFiles.get(reference) : undefined,
+        };
+      }),
+    };
+    await fsp.writeFile(manifestFile, JSON.stringify(manifest), "utf8");
+
     await new Promise<void>((resolve, reject) => {
       const child = spawn(CHATTERBOX_PYTHON, [CHATTERBOX_SCRIPT, "--segments-file", manifestFile, "--out", outFile], {
         cwd: process.cwd(),
@@ -1529,12 +1530,14 @@ function decodeReferenceAudio(reference: VoiceReferenceRequest) {
   };
 }
 
-async function cloneElevenLabsVoice({
+async function prepareVoiceReference({
   voiceName,
   references,
+  localOnly,
 }: {
   voiceName: string;
   references: VoiceReferenceRequest[];
+  localOnly: boolean;
 }) {
   const validReferences = references
     .filter((reference) => reference.consentConfirmed && cleanText(reference.dataUrl, ""))
@@ -1544,7 +1547,7 @@ async function cloneElevenLabsVoice({
   }
   const safeVoiceName = shortText(cleanText(voiceName, "ECHO cloned voice"), 70);
 
-  if (!ELEVENLABS_API_KEY) {
+  if (localOnly || !ELEVENLABS_API_KEY) {
     validReferences.forEach(decodeReferenceAudio);
     return {
       id: `local-reference-${randomUUID()}`,
@@ -1897,6 +1900,7 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
   app.use(express.json({ limit: "75mb" }));
 
   app.post("/api/clone-voice", async (req, res) => {
+    const localOnly = req.body?.provider === "chatterbox";
     try {
       const consentConfirmed = Boolean(req.body?.consentConfirmed);
       if (!consentConfirmed) {
@@ -1904,9 +1908,10 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
       }
 
       const references = Array.isArray(req.body?.references) ? req.body.references as VoiceReferenceRequest[] : [];
-      const voice = await cloneElevenLabsVoice({
+      const voice = await prepareVoiceReference({
         voiceName: cleanText(req.body?.voiceName, "ECHO cloned voice"),
         references: references.map((reference) => ({ ...reference, consentConfirmed })),
+        localOnly,
       });
 
       res.json({
@@ -1916,7 +1921,7 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
           : "ElevenLabs cloned voice is ready for Studio Quality audio.",
       });
     } catch (e: any) {
-      res.status(ELEVENLABS_API_KEY ? 502 : 501).json({
+      res.status(localOnly ? 400 : ELEVENLABS_API_KEY ? 502 : 501).json({
         error: e.message || "Unable to clone the voice.",
         elevenLabsAvailable: Boolean(ELEVENLABS_API_KEY),
       });

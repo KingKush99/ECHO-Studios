@@ -31,10 +31,12 @@ type AudioEngineStatus = {
   chatterboxInstallCommand: string;
 };
 type AudioProvider = "elevenlabs" | "chatterbox" | "piper";
+type LocalAudioProvider = Exclude<AudioProvider, "elevenlabs">;
 type PlaybackChunk = {
   startTime: number;
   endTime: number;
   nextLineIndex: number;
+  provider: LocalAudioProvider;
 };
 const PODCAST_LIBRARY_STORAGE_KEY = "echo.podcastLibrary.v1";
 
@@ -75,7 +77,7 @@ export default function App() {
   const [voiceMode, setVoiceMode] = useState<VoiceMode>("narrator");
   const [playbackRate, setPlaybackRate] = useState(1);
   const [audioEngine, setAudioEngine] = useState<AudioEngineStatus | null>(null);
-  const [audioProvider, setAudioProvider] = useState<AudioProvider>("elevenlabs");
+  const [audioProvider, setAudioProvider] = useState<AudioProvider>("chatterbox");
   const [selectedNeuralVoice, setSelectedNeuralVoice] = useState("");
   const [selectedElevenVoice, setSelectedElevenVoice] = useState("");
   const [neuralAudioUrl, setNeuralAudioUrl] = useState<string | null>(null);
@@ -140,7 +142,7 @@ export default function App() {
         if (data.voices?.[0]?.id) setSelectedNeuralVoice(data.voices[0].id);
         if (data.elevenLabsVoices?.[0]?.id) setSelectedElevenVoice(data.elevenLabsVoices[0].id);
         else if (data.elevenLabsDefaultVoiceId) setSelectedElevenVoice(data.elevenLabsDefaultVoiceId);
-        setAudioProvider(data.elevenLabsAvailable ? "elevenlabs" : data.chatterboxAvailable ? "chatterbox" : "piper");
+        setAudioProvider(data.chatterboxAvailable ? "chatterbox" : "piper");
       })
       .catch(() => {
         setAudioEngine({
@@ -460,26 +462,20 @@ export default function App() {
     podcastDataRef.current = data;
     setPodcastData(data);
     const clonedReference = data.voiceReferences?.find((reference) => reference.clonedVoiceId);
-    if (clonedReference?.clonedVoiceId) {
-      if (clonedReference.cloneProvider === "elevenlabs") {
-        const clonedVoice = {
-          id: clonedReference.clonedVoiceId,
-          name: clonedReference.clonedVoiceName || "Cloned podcast voice",
-          category: "cloned",
-        };
-        setAudioEngine((current) => current ? {
-          ...current,
-          elevenLabsAvailable: true,
-          elevenLabsVoices: [
-            clonedVoice,
-            ...current.elevenLabsVoices.filter((voice) => voice.id !== clonedVoice.id),
-          ],
-        } : current);
-        setSelectedElevenVoice(clonedVoice.id);
-        setAudioProvider("elevenlabs");
-      } else {
-        setAudioProvider("chatterbox");
-      }
+    if (clonedReference?.clonedVoiceId && clonedReference.cloneProvider === "elevenlabs" && audioEngine?.elevenLabsAvailable) {
+      const clonedVoice = {
+        id: clonedReference.clonedVoiceId,
+        name: clonedReference.clonedVoiceName || "Cloned podcast voice",
+        category: "cloned",
+      };
+      setAudioEngine((current) => current ? {
+        ...current,
+        elevenLabsVoices: [
+          clonedVoice,
+          ...current.elevenLabsVoices.filter((voice) => voice.id !== clonedVoice.id),
+        ],
+      } : current);
+      setSelectedElevenVoice(clonedVoice.id);
     }
     setPodcastLibrary((current) => {
       const key = getPodcastLibraryKey(data);
@@ -495,11 +491,10 @@ export default function App() {
     setIsPodcastPlayerOpen(true);
     setActiveTab("create");
 
-    if (audioEngine?.piperAvailable) {
+    if (audioProvider === "piper" && audioEngine?.piperAvailable) {
       continueChunkPlaybackRef.current = false;
-      setAudioProvider("piper");
       window.setTimeout(() => {
-        void generatePiperPlaybackChunk(0);
+        void generateLocalPlaybackChunk(0, "piper");
       }, 0);
     }
   }
@@ -516,6 +511,13 @@ export default function App() {
     autoPlayNeuralAudioRef.current = false;
     cancelSpeech(true);
     setIsPodcastPlayerOpen(false);
+  }
+
+  function changeAudioProvider(provider: AudioProvider) {
+    if (provider === audioProvider || isGeneratingNeuralAudioRef.current) return;
+    cancelSpeech(false);
+    revokeNeuralAudio();
+    setAudioProvider(provider);
   }
 
   function canGenerateHighQualityAudio(data: PodcastMetadata | null) {
@@ -557,17 +559,15 @@ export default function App() {
       return;
     }
 
-    if (audioEngine?.piperAvailable) {
+    if (audioProvider !== "elevenlabs" && canGenerateHighQualityAudio(podcastDataRef.current)) {
       continueChunkPlaybackRef.current = true;
-      setAudioProvider("piper");
-      void generatePiperPlaybackChunk(currentLineIndexRef.current);
+      void generateLocalPlaybackChunk(currentLineIndexRef.current, audioProvider);
       return;
     }
 
     if (!speechSupported) {
       if (canGenerateHighQualityAudio(podcastDataRef.current)) {
-        autoPlayNeuralAudioRef.current = true;
-        void generateNeuralPreview();
+        void generateNeuralPreview(true);
       } else {
         setSpeechError("This browser cannot play the fallback speech voice. Generate HD Audio first.");
       }
@@ -616,7 +616,9 @@ export default function App() {
       if (playbackChunk) {
         const withinLoadedChunk = targetTime >= playbackChunk.startTime && targetTime <= playbackChunk.endTime;
         if (withinLoadedChunk) {
-          neuralAudioRef.current.currentTime = Math.max(0, targetTime - playbackChunk.startTime);
+          const chunkDuration = playbackChunk.endTime - playbackChunk.startTime;
+          const audioDuration = neuralAudioRef.current.duration || chunkDuration;
+          neuralAudioRef.current.currentTime = (targetTime - playbackChunk.startTime) / chunkDuration * audioDuration;
           setPlaybackTime(targetTime);
           setActiveLine(targetIndex);
           return;
@@ -630,13 +632,13 @@ export default function App() {
         setActiveLine(targetIndex);
         if (wasPlaying) {
           continueChunkPlaybackRef.current = true;
-          void generatePiperPlaybackChunk(targetIndex);
+          void generateLocalPlaybackChunk(targetIndex, playbackChunk.provider);
         }
         return;
       }
 
-      const audioDuration = Number.isFinite(neuralAudioRef.current.duration) ? neuralAudioRef.current.duration : durationRef.current;
-      neuralAudioRef.current.currentTime = Math.max(0, Math.min(audioDuration || durationRef.current, targetTime));
+      const audioDuration = neuralAudioRef.current.duration || durationRef.current;
+      neuralAudioRef.current.currentTime = targetTime / durationRef.current * audioDuration;
       setPlaybackTime(targetTime);
       setActiveLine(targetIndex);
       return;
@@ -662,9 +664,10 @@ export default function App() {
     seekTo(currentTimeRef.current + seconds);
   }
 
-  async function generatePiperPlaybackChunk(startLineIndex: number) {
+  async function generateLocalPlaybackChunk(startLineIndex: number, provider: LocalAudioProvider) {
     const data = podcastDataRef.current;
-    if (!data || !audioEngine?.piperAvailable || isGeneratingNeuralAudioRef.current) return;
+    const available = provider === "chatterbox" ? audioEngine?.chatterboxAvailable : audioEngine?.piperAvailable;
+    if (!data || !available || isGeneratingNeuralAudioRef.current) return;
 
     const boundedStartIndex = Math.max(0, Math.min(startLineIndex, data.script.length - 1));
     let nextLineIndex = boundedStartIndex;
@@ -698,11 +701,13 @@ export default function App() {
           script: chunkScript,
           speakers: data.speakers,
           maxSeconds: Math.ceil(coveredSeconds),
-          provider: "piper",
-          voiceId: selectedNeuralVoice,
+          provider,
+          voiceId: provider === "piper" ? selectedNeuralVoice : undefined,
+          voiceReferences: provider === "chatterbox" ? data.voiceReferences : undefined,
         }),
       });
       const result = await response.json();
+      if (podcastDataRef.current !== data) return;
       if (!response.ok) throw new Error(result.error || "Fast playback audio failed.");
 
       if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
@@ -710,14 +715,14 @@ export default function App() {
         const buffer = Uint8Array.from(atob(result.audio), (char) => char.charCodeAt(0));
         return URL.createObjectURL(new Blob([buffer], { type: result.mimeType || "audio/wav" }));
       })();
-      playbackChunkRef.current = { startTime, endTime, nextLineIndex };
+      playbackChunkRef.current = { startTime, endTime, nextLineIndex, provider };
       autoPlayNeuralAudioRef.current = continueChunkPlaybackRef.current;
       setNeuralAudioUrl(nextAudioUrl);
       setPlaybackTime(startTime);
       setActiveLine(boundedStartIndex);
       setPlaybackStatus("idle");
-      setIsPodcastPlayerOpen(true);
     } catch (error: any) {
+      if (podcastDataRef.current !== data) return;
       continueChunkPlaybackRef.current = false;
       setNeuralAudioError(error.message || "Fast playback audio is not available.");
       setSpeechError("Playback audio could not be prepared. Open Audio Settings and try again.");
@@ -742,7 +747,7 @@ export default function App() {
     if (data && playbackChunk.nextLineIndex < data.script.length) {
       setActiveLine(playbackChunk.nextLineIndex);
       if (shouldContinue) {
-        void generatePiperPlaybackChunk(playbackChunk.nextLineIndex);
+        void generateLocalPlaybackChunk(playbackChunk.nextLineIndex, playbackChunk.provider);
         return;
       }
     }
@@ -752,14 +757,14 @@ export default function App() {
     playbackChunkRef.current = null;
   }
 
-  async function generateNeuralPreview() {
+  async function generateNeuralPreview(autoPlay = false) {
     const data = podcastDataRef.current;
     if (!data || isGeneratingNeuralAudioRef.current) return;
 
     isGeneratingNeuralAudioRef.current = true;
     playbackChunkRef.current = null;
     continueChunkPlaybackRef.current = false;
-    autoPlayNeuralAudioRef.current = false;
+    autoPlayNeuralAudioRef.current = autoPlay;
     setIsGeneratingNeuralAudio(true);
     setNeuralAudioError(null);
     setSpeechError(null);
@@ -780,6 +785,7 @@ export default function App() {
         }),
       });
       const result = await response.json();
+      if (podcastDataRef.current !== data) return;
       if (!response.ok) throw new Error(result.error || "Neural TTS failed.");
 
       if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
@@ -790,12 +796,10 @@ export default function App() {
       setNeuralAudioUrl(url);
       setPlaybackTime(0);
       setPlaybackStatus("idle");
-      setIsPodcastPlayerOpen(true);
     } catch (error: any) {
+      if (podcastDataRef.current !== data) return;
       autoPlayNeuralAudioRef.current = false;
       setNeuralAudioError(error.message || "Neural TTS is not available.");
-      const availabilityKey = audioProvider === "elevenlabs" ? "elevenLabsAvailable" : audioProvider === "chatterbox" ? "chatterboxAvailable" : "piperAvailable";
-      setAudioEngine((current) => current ? { ...current, [availabilityKey]: false } : current);
     } finally {
       isGeneratingNeuralAudioRef.current = false;
       setIsGeneratingNeuralAudio(false);
@@ -879,7 +883,11 @@ export default function App() {
           onEnded={handleNeuralAudioEnded}
           onTimeUpdate={(event) => {
             const playbackChunk = playbackChunkRef.current;
-            setPlaybackTime((playbackChunk?.startTime || 0) + event.currentTarget.currentTime);
+            const startTime = playbackChunk?.startTime || 0;
+            const scriptSeconds = (playbackChunk?.endTime || durationRef.current) - startTime;
+            const { currentTime, duration } = event.currentTarget;
+            const elapsed = Number.isFinite(duration) && duration > 0 ? currentTime / duration * scriptSeconds : currentTime;
+            setPlaybackTime(startTime + elapsed);
           }}
           onLoadedMetadata={(event) => {
             event.currentTarget.playbackRate = playbackRateRef.current;
@@ -920,10 +928,10 @@ export default function App() {
         neuralAudioAvailable={!!neuralAudioUrl}
         isGeneratingNeuralAudio={isGeneratingNeuralAudio}
         neuralAudioError={neuralAudioError}
-        onAudioProviderChange={setAudioProvider}
+        onAudioProviderChange={changeAudioProvider}
         onNeuralVoiceChange={setSelectedNeuralVoice}
         onElevenVoiceChange={setSelectedElevenVoice}
-        onGenerateNeuralPreview={generateNeuralPreview}
+        onGenerateNeuralPreview={() => void generateNeuralPreview()}
         onClose={closePodcastPlayer}
       />
 

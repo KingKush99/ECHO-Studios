@@ -727,6 +727,7 @@ export function CreateView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: "chatterbox",
           voiceName,
           consentConfirmed: voiceConsent,
           references: voiceReferences.map(({ name, mimeType, size, dataUrl, consentConfirmed }) => ({

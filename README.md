@@ -31,9 +31,9 @@ Ollama writes dialogue for your selected cast and language using the episode pro
 
 Browser speech is only a fallback and can sound robotic. For better free local voices, install Piper with `.\install-piper.ps1`, restart the app, create an episode, then use `Generate Neural Sample` in the player.
 
-For the best free local voice, install Chatterbox with `.\install-chatterbox.ps1`, generate an episode, choose `Chatterbox HD` in the player, then generate HD audio. Its built-in natural voice needs no upload. You can also upload voice references you have permission to use and assign separate references to cast members. This requires no API key, but CPU generation is slower than a hosted GPU service.
+Install Chatterbox with `.\install-chatterbox.ps1` and restart ECHO Studios for natural local speech. The player uses Chatterbox HD by default when available, and Play loads the episode in short sections. Generate HD Audio renders the whole episode. Its built-in natural voice needs no upload. To give hosts distinct Chatterbox voices, assign each one a voice reference you have permission to use. Piper Cast uses separate installed local voices without reference uploads and is faster on CPU.
 
-For ElevenLabs-level hosted quality, set `ELEVENLABS_API_KEY` in `.env` or in your Vercel environment variables.
+The local workflow requires no API key. If you configure `ELEVENLABS_API_KEY` separately, ElevenLabs appears as an optional hosted provider in Audio Settings and requires a manual selection.
 
 ## GitHub Pages
 

@@ -6,6 +6,7 @@ import { promises as fsp } from "fs";
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { createServer as createViteServer } from "vite";
+import { writePodcastWithOllama } from "./podcast-script";
 
 dotenv.config();
 
@@ -983,8 +984,10 @@ function normalizeSpeakers(input: RequestedSpeaker[] | undefined, numSpeakers = 
   });
 }
 
-function estimateSeconds(dialogue: string): number {
-  const words = dialogue.split(/\s+/).filter(Boolean).length;
+function estimateSeconds(dialogue: string, segmenter?: Intl.Segmenter): number {
+  const words = segmenter
+    ? Array.from(segmenter.segment(dialogue)).filter((segment) => segment.isWordLike).length
+    : dialogue.split(/\s+/).filter(Boolean).length;
   return Math.max(6, Math.ceil(words / 2.45) + 1);
 }
 
@@ -1765,7 +1768,7 @@ function getLineTemplate(
   return formatLines[episodeFormat.id][beat];
 }
 
-async function buildLocalPodcast(req: LocalPodcastRequest) {
+async function buildLocalPodcast(req: LocalPodcastRequest, signal: AbortSignal) {
   const topic = cleanText(req.topic, "A creator-led conversation about a new idea");
   const fallbackDuration = req.duration && req.duration in DURATION_TARGET_SECONDS ? req.duration : "hour";
   const requestedDurationSeconds = Math.round(Number(req.durationSeconds) || 0);
@@ -1774,15 +1777,28 @@ async function buildLocalPodcast(req: LocalPodcastRequest) {
     ? clampNumber(requestedDurationSeconds, MIN_CUSTOM_DURATION_SECONDS, MAX_CUSTOM_DURATION_SECONDS)
     : DURATION_TARGET_SECONDS[fallbackDuration];
   const duration = getDurationMode(targetSeconds, fallbackDuration);
-  const durationLabel = formatDurationLabel(targetSeconds);
   const musicMood = cleanText(req.musicMood, "Pure Speech");
   const language = cleanText(req.language, "English");
   const speakers = normalizeSpeakers(req.speakers, req.numSpeakers);
   const imageContext = getImageContext(req.promptImages);
   const voiceContext = getVoiceReferenceContext(req.voiceReferences);
   const researchSources = await fetchTopicResearch(topic);
+  signal.throwIfAborted();
   const episodeFormat = chooseEpisodeFormat(topic, researchSources, targetSeconds);
-  const maxLines = Math.min(1400, Math.max(speakers.length * 3, Math.ceil(targetSeconds / 6) + speakers.length * 3));
+  const model = process.env.OLLAMA_MODEL?.trim();
+  let generatedSections: Awaited<ReturnType<typeof writePodcastWithOllama>> | undefined;
+  if (model) {
+    try {
+      generatedSections = await writePodcastWithOllama({
+        model, topic, language, episodeFormat, imageContext, speakers,
+        sources: researchSources, targetSeconds, signal,
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      const message = error instanceof SyntaxError ? "Invalid JSON" : error instanceof Error ? error.message : "Unknown error";
+      console.warn(`[ECHO Studios] Ollama script generation failed: ${message}`);
+    }
+  }
   const script: Array<{
     id: string;
     speakerName: string;
@@ -1792,20 +1808,21 @@ async function buildLocalPodcast(req: LocalPodcastRequest) {
     estimatedStartSeconds: number;
   }> = [];
   let cursor = 0;
-  let index = 0;
+  const chapterStarts: Array<{ title: string; lineIndex: number }> = [];
+  const segmenter = generatedSections && language === "Japanese" ? new Intl.Segmenter("ja", { granularity: "word" }) : undefined;
 
-  while ((cursor < targetSeconds || script.length < speakers.length * 3) && index < maxLines) {
-    const speaker = speakers[index % speakers.length];
-    const dialogue = getLineTemplate(index, topic, imageContext, musicMood, duration, researchSources, episodeFormat);
-    const durationSeconds = estimateSeconds(dialogue);
+  function appendLine(speakerName: string, dialogue: string) {
+    const index = script.length;
+    const durationSeconds = estimateSeconds(dialogue, segmenter);
+    const isTemplateOutro = !generatedSections && cursor + durationSeconds >= targetSeconds - 15;
     script.push({
       id: String(index + 1),
-      speakerName: speaker.name,
+      speakerName,
       dialogue,
       soundEffect:
         index === 0
           ? "intro music fades under the host"
-          : cursor + durationSeconds >= targetSeconds - 15
+          : isTemplateOutro
             ? "soft outro sting"
             : index % 18 === 0
               ? "brief reflective pause"
@@ -1814,9 +1831,29 @@ async function buildLocalPodcast(req: LocalPodcastRequest) {
       estimatedStartSeconds: cursor,
     });
     cursor += durationSeconds;
-    index += 1;
   }
-  cursor = fitScriptToTargetDuration(script, targetSeconds);
+
+  if (generatedSections) {
+    const titles = new Set<string>();
+    for (const [index, section] of generatedSections.entries()) {
+      const title = titles.has(section.title) ? `${section.title} (${index + 1})` : section.title;
+      titles.add(section.title);
+      chapterStarts.push({ title, lineIndex: script.length });
+      for (const line of section.lines) {
+        appendLine(speakers[line.speaker - 1].name, line.dialogue);
+      }
+    }
+    script[script.length - 1].soundEffect = "soft outro sting";
+  } else {
+    const maxLines = Math.min(1400, Math.max(speakers.length * 3, Math.ceil(targetSeconds / 6) + speakers.length * 3));
+    while ((cursor < targetSeconds || script.length < speakers.length * 3) && script.length < maxLines) {
+      const index = script.length;
+      const dialogue = getLineTemplate(index, topic, imageContext, musicMood, duration, researchSources, episodeFormat);
+      appendLine(speakers[index % speakers.length].name, dialogue);
+    }
+  }
+  const scriptSeconds = generatedSections ? cursor : fitScriptToTargetDuration(script, targetSeconds);
+  const durationLabel = formatDurationLabel(scriptSeconds);
 
   const ratios = getChapterRatios(duration, targetSeconds);
   const titles = episodeFormat.chapterTitles;
@@ -1824,10 +1861,15 @@ async function buildLocalPodcast(req: LocalPodcastRequest) {
     ? ` Research sources: ${researchSources.map((source) => source.title).join("; ")}.`
     : " Live research was unavailable, so claims are framed cautiously.";
   const structureSummary = ` Structure: ${episodeFormat.title}.`;
+  const generationLabel = generatedSections
+    ? "Written with local AI."
+    : model
+      ? "Local AI was unavailable. This script uses the built-in templates."
+      : "Written with the built-in templates.";
 
   return {
     title: titleFromPrompt(topic),
-    tagline: `A ${durationLabel} ${episodeFormat.title.toLowerCase()} episode built from your prompt and live sources.`,
+    tagline: `Estimated length ${durationLabel}. ${generationLabel}`,
     description:
       language === "English"
         ? `A free, locally generated ECHO Studios script exploring ${shortText(topic, 150)}.${structureSummary}${sourceSummary}${voiceContext ? ` Voice reference: ${voiceContext}.` : ""}`
@@ -1835,10 +1877,12 @@ async function buildLocalPodcast(req: LocalPodcastRequest) {
     episodeFormat: episodeFormat.title,
     musicMood,
     speakers,
-    chapters: ratios.map((ratio, index) => ({
-      title: titles[index % titles.length] || `Chapter ${index + 1}`,
-      startSeconds: Math.round(targetSeconds * ratio),
-    })),
+    chapters: generatedSections
+      ? chapterStarts.map(({ title, lineIndex }) => ({ title, startSeconds: script[lineIndex].estimatedStartSeconds }))
+      : ratios.map((ratio, index) => ({
+          title: titles[index % titles.length] || `Chapter ${index + 1}`,
+          startSeconds: Math.round(targetSeconds * ratio),
+        })),
     script,
     researchSources,
   };
@@ -1880,9 +1924,12 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
   });
 
   app.post("/api/generate-podcast", async (req, res) => {
+    const controller = new AbortController();
+    res.once("close", () => controller.abort());
     try {
-      res.json(await buildLocalPodcast(req.body || {}));
+      res.json(await buildLocalPodcast(req.body || {}, controller.signal));
     } catch (e: any) {
+      if (controller.signal.aborted) return;
       console.error("ECHO Studios local generation error:", e);
       res.status(500).json({ error: e.message || "Unable to generate the podcast script." });
     }

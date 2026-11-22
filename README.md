@@ -19,6 +19,16 @@ Prerequisite: Node.js
 
 No API key is required for the free local mode.
 
+### Generate scripts with Ollama
+
+1. Install [Ollama](https://ollama.com/download) and keep it running on the same machine as ECHO Studios.
+2. Use `ollama list` to check your installed models. To install an example model, run `ollama pull qwen3-vl:4b-instruct`.
+3. Add `OLLAMA_MODEL=qwen3-vl:4b-instruct` to a `.env` file in the project root, using the exact name of your installed model. Restart ECHO Studios and generate an episode as usual.
+
+Ollama writes dialogue for your selected cast and language using the episode prompt, image notes, and available research. Longer episodes are written in sections and may take several minutes. The actual length varies. The preview shows the estimated length and whether local AI or the built-in templates wrote the draft. The app uses the templates when Ollama is disabled or cannot produce a valid script.
+
+### Voice playback
+
 Browser speech is only a fallback and can sound robotic. For better free local voices, install Piper with `.\install-piper.ps1`, restart the app, create an episode, then use `Generate Neural Sample` in the player.
 
 For the best free local voice, install Chatterbox with `.\install-chatterbox.ps1`, generate an episode, choose `Chatterbox HD` in the player, then generate HD audio. Its built-in natural voice needs no upload. You can also upload voice references you have permission to use and assign separate references to cast members. This requires no API key, but CPU generation is slower than a hosted GPU service.

@@ -7,6 +7,7 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { createServer as createViteServer } from "vite";
 import { writePodcastWithOllama } from "./podcast-script";
+import { getKokoroVoices } from "./src/voice-options";
 
 dotenv.config();
 
@@ -73,7 +74,9 @@ type AudioRequest = {
   }>;
   speakers?: RequestedSpeaker[];
   maxSeconds?: number;
-  provider?: "elevenlabs" | "piper" | "chatterbox";
+  provider?: "elevenlabs" | "piper" | "chatterbox" | "kokoro";
+  language?: string;
+  voiceOverrides?: Record<string, string>;
   voiceId?: string;
   modelId?: string;
   voiceReferences?: VoiceReferenceRequest[];
@@ -200,6 +203,7 @@ function getChapterRatios(duration: "short" | "medium" | "long" | "hour", target
 }
 
 const LOCAL_TTS_DIR = path.join(process.cwd(), "local-tts");
+const KOKORO_ENABLED = process.env.KOKORO_ENABLED === "1" || (!process.env.VERCEL && process.env.KOKORO_ENABLED !== "0");
 const PIPER_EXE = process.env.PIPER_EXE || path.join(LOCAL_TTS_DIR, "piper", "piper.exe");
 const PIPER_VOICE_DIR = process.env.PIPER_VOICE_DIR || path.join(LOCAL_TTS_DIR, "voices");
 const CHATTERBOX_DIR = process.env.CHATTERBOX_DIR || path.join(LOCAL_TTS_DIR, "chatterbox");
@@ -405,6 +409,7 @@ function getAvailablePiperVoices() {
 function getAudioEngineStatus() {
   const voices = getAvailablePiperVoices();
   return {
+    kokoroAvailable: KOKORO_ENABLED,
     piperAvailable: fileExists(PIPER_EXE) && voices.length > 0,
     chatterboxAvailable: fileExists(CHATTERBOX_PYTHON) && fileExists(CHATTERBOX_SCRIPT) && fileExists(CHATTERBOX_PACKAGE_DIR),
     elevenLabsAvailable: Boolean(ELEVENLABS_API_KEY),
@@ -1191,8 +1196,8 @@ function choosePiperVoiceForSpeaker(
   const style = `${speaker?.gender || ""} ${speaker?.style || ""} ${speakerName}`.toLowerCase();
 
   if (selectedVoice && speakerIndex === 0) return selectedVoice;
-  if (style.includes("male")) return voices.find((voice) => voice.id === "ryan") || voices[speakerIndex % voices.length];
-  if (style.includes("female")) return voices.find((voice) => voice.id === "amy") || voices.find((voice) => voice.id === "lessac") || voices[speakerIndex % voices.length];
+  if (speaker?.gender === "male") return voices.find((voice) => voice.id === "ryan") || voices[speakerIndex % voices.length];
+  if (speaker?.gender === "female") return voices.find((voice) => voice.id === "amy") || voices.find((voice) => voice.id === "lessac") || voices[speakerIndex % voices.length];
   if (style.includes("skeptical")) return voices.find((voice) => voice.id === "ryan") || voices[speakerIndex % voices.length];
   if (style.includes("enthusiastic")) return voices.find((voice) => voice.id === "amy") || voices[speakerIndex % voices.length];
   return voices[(speakerIndex + hashString(speakerName)) % voices.length];
@@ -1341,9 +1346,8 @@ function extensionFromMimeType(mimeType: string) {
   return ".wav";
 }
 
-function compactChatterboxSegments(segments: AudioSegment[]) {
+function chunkVoiceSegments(segments: AudioSegment[], maxChunkChars = 360) {
   const compacted: Pick<AudioSegment, "speakerName" | "text">[] = [];
-  const maxChunkChars = 360;
 
   for (const { speakerName, text } of segments) {
     let remaining = text;
@@ -1363,6 +1367,69 @@ function compactChatterboxSegments(segments: AudioSegment[]) {
   }
 
   return compacted;
+}
+
+let kokoroModel: Promise<import("kokoro-js").KokoroTTS> | undefined;
+
+function getKokoroModel() {
+  kokoroModel ??= (async () => {
+    const { env } = await import("@huggingface/transformers");
+    env.cacheDir = path.join(LOCAL_TTS_DIR, "kokoro");
+    const { KokoroTTS } = await import("kokoro-js");
+    return KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", { device: "cpu", dtype: "q8" });
+  })().catch((error) => {
+    kokoroModel = undefined;
+    throw error;
+  });
+  return kokoroModel;
+}
+
+async function synthesizeWithKokoro(req: AudioRequest, signal: AbortSignal) {
+  if (!KOKORO_ENABLED) throw new Error("Kokoro voices are unavailable on this server.");
+  const voices = getKokoroVoices(cleanText(req.language, "English"));
+  if (!voices.length) throw new Error("Kokoro voices are available for English episodes.");
+  const segments = chunkVoiceSegments(buildAudioPreviewSegments(req), 230);
+  if (!segments.length) throw new Error("No script text was provided for Kokoro generation.");
+
+  const speakers = Array.isArray(req.speakers) ? req.speakers : [];
+  const names = new Set([...speakers.map((speaker) => cleanText(speaker?.name, "Host")), ...segments.map(({ speakerName }) => speakerName)]);
+  const assigned = new Map<string, (typeof voices)[number]>();
+  const used = new Set<string>();
+  for (const name of names) {
+    const wanted = req.voiceOverrides && Object.hasOwn(req.voiceOverrides, name) ? req.voiceOverrides[name] : undefined;
+    const explicit = voices.find(({ id }) => id === wanted);
+    if (explicit) {
+      assigned.set(name, explicit);
+      used.add(explicit.id);
+    }
+  }
+  for (const name of names) {
+    if (assigned.has(name)) continue;
+    const gender = speakers.find((speaker) => cleanText(speaker?.name, "Host") === name)?.gender;
+    const voice = voices.find((item) => item.gender === gender && !used.has(item.id))
+      || voices.find((item) => !used.has(item.id))
+      || voices[assigned.size % voices.length];
+    assigned.set(name, voice);
+    used.add(voice.id);
+  }
+
+  const tts = await getKokoroModel();
+  const parts: Buffer[] = [];
+  const format: WavFormat = { audioFormat: 1, channels: 1, sampleRate: 24000, byteRate: 48000, blockAlign: 2, bitsPerSample: 16 };
+  for (const [index, segment] of segments.entries()) {
+    signal.throwIfAborted();
+    const voice = assigned.get(segment.speakerName) || voices[0];
+    const { audio, sampling_rate } = await tts.generate(segment.text, { voice: voice.id });
+    if (!audio.length || sampling_rate !== format.sampleRate) throw new Error("Kokoro returned audio in an unexpected format.");
+    const pcm = Buffer.allocUnsafe(audio.length * format.blockAlign);
+    for (let index = 0; index < audio.length; index += 1) {
+      pcm.writeInt16LE(Math.round(clampNumber(audio[index], -1, 1) * 32767), index * format.blockAlign);
+    }
+    parts.push(pcm);
+    if (index < segments.length - 1) parts.push(makeSilence(format, 120));
+  }
+  const cast = [...new Set(segments.map(({ speakerName }) => assigned.get(speakerName)?.label.split(" · ")[0]))].filter(Boolean);
+  return { audio: buildWav(format, Buffer.concat(parts)).toString("base64"), voice: { id: "kokoro-cast", name: `Kokoro: ${cast.join(", ")}` } };
 }
 
 function findChatterboxReferenceForSpeaker(
@@ -1394,7 +1461,7 @@ async function synthesizeWithChatterbox(req: AudioRequest) {
     throw new Error("Chatterbox HD is not installed. Run .\\install-chatterbox.ps1, restart the app, then generate HD audio.");
   }
 
-  const segments = compactChatterboxSegments(buildAudioPreviewSegments(req));
+  const segments = chunkVoiceSegments(buildAudioPreviewSegments(req));
   if (segments.length === 0) throw new Error("No script text was provided for Chatterbox generation.");
 
   const references = Array.isArray(req.voiceReferences)
@@ -1879,6 +1946,7 @@ async function buildLocalPodcast(req: LocalPodcastRequest, signal: AbortSignal) 
         : `A free, locally generated ECHO Studios script framed for ${language} production and exploring ${shortText(topic, 130)}.${structureSummary}${sourceSummary}${voiceContext ? ` Voice reference: ${voiceContext}.` : ""}`,
     episodeFormat: episodeFormat.title,
     musicMood,
+    language,
     speakers,
     chapters: generatedSections
       ? chapterStarts.map(({ title, lineIndex }) => ({ title, startSeconds: script[lineIndex].estimatedStartSeconds }))
@@ -2030,17 +2098,22 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
   });
 
   app.post("/api/generate-audio", async (req, res) => {
+    const controller = new AbortController();
+    res.once("close", () => controller.abort());
     try {
       const text = buildAudioPreviewText(req.body || {});
       if (!text) {
         return res.status(400).json({ error: "No script text was provided for audio generation." });
       }
-      const provider = req.body?.provider === "elevenlabs" ? "elevenlabs" : req.body?.provider === "chatterbox" ? "chatterbox" : "piper";
+      const provider = req.body?.provider === "kokoro" ? "kokoro" : req.body?.provider === "elevenlabs" ? "elevenlabs" : req.body?.provider === "chatterbox" ? "chatterbox" : "piper";
       const result = provider === "elevenlabs"
         ? await synthesizeWithElevenLabs(text, req.body?.voiceId, req.body?.modelId)
         : provider === "chatterbox"
           ? await synthesizeWithChatterbox(req.body || {})
-          : await synthesizeWithPiperCast(req.body || {});
+          : provider === "kokoro"
+            ? await synthesizeWithKokoro(req.body || {}, controller.signal)
+            : await synthesizeWithPiperCast(req.body || {});
+      if (controller.signal.aborted) return;
       const mimeType = provider === "elevenlabs" ? "audio/mpeg" : "audio/wav";
       const audioUrl = storeGeneratedAudio(result.audio, mimeType);
       res.json({
@@ -2050,6 +2123,7 @@ export async function createEchoApp(options: { assetsMode?: AppAssetsMode } = {}
         audioUrl,
       });
     } catch (e: any) {
+      if (controller.signal.aborted) return;
       res.status(501).json({
         error: e.message || "Neural TTS is not available.",
         ...getAudioEngineStatus(),

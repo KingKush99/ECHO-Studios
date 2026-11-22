@@ -29,9 +29,11 @@ Ollama writes dialogue for your selected cast and language using the episode pro
 
 ### Voice playback
 
+English episodes use Kokoro by default when running ECHO Studios locally. The first playback downloads the model into `local-tts/kokoro`. Open the episode from the bottom playback bar and expand Audio settings to choose a voice for each host. Other episode languages use available browser voices by default. [Kokoro model and samples](https://huggingface.co/hexgrad/Kokoro-82M)
+
 Browser speech is only a fallback and can sound robotic. For better free local voices, install Piper with `.\install-piper.ps1`, restart the app, create an episode, then use `Generate Neural Sample` in the player.
 
-Install Chatterbox with `.\install-chatterbox.ps1` and restart ECHO Studios for natural local speech. The player uses Chatterbox HD by default when available, and Play loads the episode in short sections. Generate HD Audio renders the whole episode. Its built-in natural voice needs no upload. To give hosts distinct Chatterbox voices, assign each one a voice reference you have permission to use. Piper Cast uses separate installed local voices without reference uploads and is faster on CPU.
+Install Chatterbox with `.\install-chatterbox.ps1` and restart ECHO Studios to use custom reference voices. Switch to Chatterbox HD in Audio settings and assign each host a voice reference you have permission to use. Piper Cast uses separate installed local voices without reference uploads. Play loads local audio in short sections, and Generate full audio renders the whole episode.
 
 The local workflow requires no API key. If you configure `ELEVENLABS_API_KEY` separately, ElevenLabs appears as an optional hosted provider in Audio Settings and requires a manual selection.
 

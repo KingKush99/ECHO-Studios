@@ -8,9 +8,20 @@
   
   --color-brand-50: #f4f6fb;
   --color-brand-100: #e8ecf7;
-  --color-brand-500: #6366f1;
+  --color-brand-300: #bbb6ff;
+  --color-brand-400: #a49bff;
+  --color-brand-500: #7567f4;
   --color-brand-600: #4f46e5;
   --color-brand-950: #0f1026;
+}
+
+.app-shell { --app-dock-height: calc(65px + env(safe-area-inset-bottom)); }
+.app-shell[data-playing-bar="true"] { --app-dock-height: calc(142px + env(safe-area-inset-bottom)); }
+
+.assistant-panel {
+  bottom: calc(var(--app-dock-height) + 4.25rem);
+  width: min(24rem, calc(100vw - 2rem));
+  height: min(27rem, calc(100dvh - var(--app-dock-height) - 5rem));
 }
 
 @layer base {

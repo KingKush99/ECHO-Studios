@@ -366,10 +366,12 @@ export function CreateView({
   onGenerated,
   onUpdated,
   generatedPodcast,
+  onOpenEpisode,
 }: {
   onGenerated: (data: PodcastMetadata) => void;
   onUpdated: (data: PodcastMetadata) => void;
   generatedPodcast?: PodcastMetadata | null;
+  onOpenEpisode: () => void;
 }) {
   const [topic, setTopic] = useState("");
   const [promptAudience, setPromptAudience] = useState("");
@@ -798,27 +800,23 @@ export function CreateView({
   };
 
   return (
-    <div className={`p-6 pb-40 ${generatedPodcast ? "grid grid-cols-1 lg:grid-cols-2 gap-8 max-w-7xl" : "max-w-2xl mx-auto space-y-8"}`}>
-      <div className="space-y-8">
-        <div className="text-center lg:text-left space-y-2 mb-8">
-          <div className={`w-16 h-16 rounded-full bg-brand-500/10 border border-brand-500/20 flex items-center justify-center mb-4 ${!generatedPodcast ? "mx-auto" : ""}`}>
-            <Mic2 className="w-8 h-8 text-brand-400" />
-          </div>
-          <h1 className="text-3xl font-display font-bold text-white tracking-tight">Create an Episode</h1>
-          <p className="text-gray-400 text-sm">Turn a text prompt, image references, and custom cast voices into a podcast script from 1 minute to 120 minutes.</p>
+    <div className={`mx-auto px-4 py-8 sm:px-6 sm:py-10 ${generatedPodcast ? "grid gap-9 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "max-w-2xl"}`}>
+      <div className="space-y-6">
+        <div>
+          <h1 className="font-display text-3xl font-bold tracking-tight text-white sm:text-4xl">Create an episode</h1>
+          <p className="mt-1 text-sm text-zinc-400">Choose a topic, cast, and duration.</p>
         </div>
 
-        <div className="bg-black/20 border border-white/5 rounded-2xl p-6 space-y-6">
+        <div className="space-y-5">
           <div className="space-y-3">
-            <label className="text-xs font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
-              <Wand2 className="w-3 h-3" /> Prompt
-            </label>
+            <label htmlFor="episode-prompt" className="text-sm font-semibold text-zinc-100">Topic</label>
             <div className="relative">
               <textarea
+                id="episode-prompt"
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="Describe the episode, angle, audience, and anything the hosts should focus on."
-                className="w-full bg-black/40 border border-white/10 rounded-xl p-4 pl-14 pb-12 text-white placeholder-gray-500 focus:outline-none focus:border-brand-500/50 transition-colors resize-none h-32 text-sm"
+                className="h-32 w-full resize-y rounded-2xl border border-white/15 bg-[#1a1624] p-4 pb-12 text-sm text-white placeholder-zinc-500 outline-none transition-colors focus:border-brand-400"
               />
               <button
                 onClick={togglePromptDictation}
@@ -829,22 +827,14 @@ export function CreateView({
                 <Mic2 className="h-4 w-4" />
               </button>
             </div>
-            <div>
-              <button
-                onClick={fleshOutPrompt}
-                disabled={!topic.trim() && !hasPromptDetails(getPromptDetails())}
-                className="w-full rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-brand-500 disabled:cursor-not-allowed disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                <Wand2 className="h-4 w-4" />
-                Flesh Out Prompt
-              </button>
-            </div>
             {(dictationPreview || dictationError) && (
               <div className={`rounded-xl border px-3 py-2 text-xs ${dictationError ? "border-red-500/20 bg-red-500/10 text-red-100" : "border-brand-500/20 bg-brand-500/10 text-brand-100"}`}>
                 {dictationError || `Listening: ${dictationPreview}`}
               </div>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+            <details className="group text-sm">
+              <summary className="cursor-pointer text-zinc-400 hover:text-white">Prompt options</summary>
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               <input
                 value={promptAudience}
                 onChange={(event) => setPromptAudience(event.target.value)}
@@ -869,8 +859,8 @@ export function CreateView({
                 placeholder="Evidence, examples, or people to include"
                 className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-white outline-none placeholder:text-gray-500 focus:border-brand-500/50"
               />
-            </div>
-            <div className="flex flex-wrap gap-2">
+              </div>
+              <div className="my-3 flex flex-wrap gap-2">
               {PRESET_TOPICS.map((preset) => (
                 <button
                   key={preset.category}
@@ -880,9 +870,14 @@ export function CreateView({
                   {preset.emoji} {preset.category}
                 </button>
               ))}
-            </div>
+              </div>
+              <button onClick={fleshOutPrompt} disabled={!topic.trim() && !hasPromptDetails(getPromptDetails())} className="inline-flex items-center gap-2 rounded-lg px-2 py-2 font-semibold text-brand-300 hover:bg-white/5 disabled:opacity-40"><Wand2 className="size-4" /> Flesh out prompt</button>
+            </details>
           </div>
 
+          <details className="border-y border-white/10 py-3">
+            <summary className="cursor-pointer text-sm font-medium text-zinc-300 hover:text-white">Images and custom voices</summary>
+            <div className="mt-4 space-y-5">
           <div className="space-y-3">
             <label className="text-xs font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
               <ImageIcon className="w-3 h-3" /> Image Prompts
@@ -1024,6 +1019,9 @@ export function CreateView({
             </div>
           </div>
 
+            </div>
+          </details>
+
           <div className="space-y-3">
             <label className="text-xs font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
               <Mic2 className="w-3 h-3" /> Select Cast
@@ -1035,18 +1033,18 @@ export function CreateView({
                 return (
                   <div
                     key={host.id}
-                    className={`flex items-start text-left p-3 rounded-xl border transition-all ${
-                      isSelected ? "bg-brand-500/20 border-brand-500/50" : "bg-white/5 border-white/5 hover:border-white/20 opacity-70"
+                    className={`flex items-start text-left rounded-xl border transition-colors ${
+                      isSelected ? "border-brand-400/40 bg-brand-500/10" : "border-white/10 hover:border-white/25"
                     }`}
                   >
-                    <div className="w-full space-y-3">
-                      <button onClick={() => toggleHost(host.id)} className="w-full text-left">
+                    <div className="w-full">
+                      <button onClick={() => toggleHost(host.id)} aria-pressed={isSelected} className="min-h-11 w-full px-3 py-2 text-left">
                         <div className="flex items-center gap-2">
+                          <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${isSelected ? "bg-brand-400" : "bg-white/20"}`} />
                           <span className="font-medium text-sm text-white">{host.name}</span>
-                          <span className="text-[9px] text-brand-300 uppercase tracking-wider">{host.role}</span>
                         </div>
                       </button>
-                      {isSelected && (
+                      {isSelected && voiceReferences.length > 0 && (
                         <select
                           value={assignedVoiceId}
                           onChange={(event) => setVoiceAssignments((current) => ({ ...current, [host.id]: event.target.value }))}
@@ -1061,11 +1059,6 @@ export function CreateView({
                           ))}
                         </select>
                       )}
-                      {isSelected && assignedVoiceId && (
-                        <div className="text-[11px] leading-snug text-brand-100/80">
-                          Assigned: {voiceReferences.find((voice) => voice.id === assignedVoiceId)?.name || "Custom voice"}
-                        </div>
-                      )}
                     </div>
                   </div>
                 );
@@ -1073,26 +1066,22 @@ export function CreateView({
             </div>
           </div>
 
-          <div className="space-y-3 pt-4 border-t border-white/5">
-            <label className="text-xs font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
-              <Settings2 className="w-3 h-3" /> Production Settings
-            </label>
-            <div className="rounded-xl border border-white/10 bg-black/25 p-4 space-y-3">
+          <div className="space-y-3 border-t border-white/10 pt-4">
+            <div className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs font-bold uppercase tracking-widest text-gray-400">Podcast Length</span>
                 <span className="text-sm font-bold text-white">{formatDurationLabel(durationSeconds)}</span>
               </div>
-              <input
-                type="range"
-                min={MIN_DURATION_SECONDS}
-                max={MAX_DURATION_SECONDS}
-                step={1}
-                value={durationSeconds}
-                onChange={(event) => setDurationSeconds(clampDurationSeconds(Number(event.target.value)))}
-                className="w-full accent-brand-500"
-                aria-label="Podcast length from 1 minute to 120 minutes"
-              />
-              <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-wrap gap-2" aria-label="Episode length">
+                {[1, 5, 15, 60].map((minutes) => (
+                  <button key={minutes} onClick={() => setDurationSeconds(minutes * 60)} aria-pressed={durationSeconds === minutes * 60} className={`rounded-lg border px-3 py-1.5 text-sm ${durationSeconds === minutes * 60 ? "border-brand-400/45 bg-brand-500/10 text-white" : "border-white/10 text-zinc-400 hover:text-white"}`}>
+                    {minutes} min
+                  </button>
+                ))}
+              </div>
+              <details>
+                <summary className="cursor-pointer text-sm text-zinc-400 hover:text-white">Custom length</summary>
+              <div className="mt-3 grid grid-cols-2 gap-2">
                 <label className="space-y-1">
                   <span className="text-[11px] text-gray-500">Minutes</span>
                   <input
@@ -1116,16 +1105,19 @@ export function CreateView({
                   />
                 </label>
               </div>
+              </details>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <select value={musicMood} onChange={(e) => setMusicMood(e.target.value)} className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-xs outline-none">
+            <details>
+              <summary className="cursor-pointer text-sm text-zinc-400 hover:text-white"><Settings2 className="mr-1 inline size-3.5" /> Language and mood</summary>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <select aria-label="Music mood" value={musicMood} onChange={(e) => setMusicMood(e.target.value)} className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-xs outline-none">
                 {AUDIO_MOODS.map((mood) => (
                   <option key={mood.id} value={mood.id}>
                     {mood.name}
                   </option>
                 ))}
               </select>
-              <select value={language} onChange={(e) => setLanguage(e.target.value)} className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-xs outline-none">
+              <select aria-label="Episode language" value={language} onChange={(e) => setLanguage(e.target.value)} className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white text-xs outline-none">
                 {LANGUAGES.map((item) => (
                   <option key={item.code} value={item.code}>
                     {item.label}
@@ -1133,6 +1125,7 @@ export function CreateView({
                 ))}
               </select>
             </div>
+            </details>
           </div>
 
           {error && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-200 text-xs">{error}</div>}
@@ -1158,7 +1151,7 @@ export function CreateView({
       </div>
 
       {generatedPodcast && (
-        <div className="bg-[#0c0d21]/50 border border-white/5 rounded-2xl p-6 lg:p-8 space-y-6">
+        <div className="space-y-5 border-t border-white/10 pt-6 lg:border-l lg:border-t-0 lg:pl-8 lg:pt-0">
           <div className="flex flex-wrap gap-2">
             <div className="inline-flex px-3 py-1 rounded-full bg-brand-500/20 border border-brand-500/30 text-brand-300 text-xs font-mono">SCRIPT PREVIEW</div>
             <div className="inline-flex px-3 py-1 rounded-full bg-white/5 border border-white/10 text-gray-300 text-xs font-mono">
@@ -1167,6 +1160,7 @@ export function CreateView({
           </div>
           <h2 className="text-2xl font-display font-medium text-white">{generatedPodcast.title}</h2>
           <p className="text-gray-400 text-sm">{generatedPodcast.tagline}</p>
+          <button onClick={onOpenEpisode} className="rounded-xl bg-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15">Open episode</button>
 
           {generatedPodcast.researchSources && generatedPodcast.researchSources.length > 0 && (
             <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">

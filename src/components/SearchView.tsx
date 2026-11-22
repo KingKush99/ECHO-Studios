@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Clock, Flame, Headphones, Mic2, Play, Search, SlidersHorizontal, UserCircle, Volume2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Clock, Flame, Headphones, Mic2, Play, Search, SlidersHorizontal, UserCircle } from "lucide-react";
 
 type TopPodcast = {
   id: string;
@@ -64,15 +64,11 @@ function formatListeners(value: number) {
   return value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
 }
 
-export function SearchView() {
-  const audioRef = useRef<HTMLAudioElement>(null);
+export function SearchView({ onPlayEpisode, playingId }: { onPlayEpisode: (podcast: TopPodcast) => void; playingId?: string }) {
   const [query, setQuery] = useState("");
   const [filterType, setFilterType] = useState<"a-z" | "old-new" | "topic" | "popularity" | "duration">("popularity");
   const [searchCategory, setSearchCategory] = useState<"all" | "podcasts" | "users">("all");
   const [topPodcasts, setTopPodcasts] = useState<TopPodcast[]>(FALLBACK_TOP_PODCASTS);
-  const [selectedPodcastId, setSelectedPodcastId] = useState(FALLBACK_TOP_PODCASTS[0].id);
-
-  const selectedPodcast = topPodcasts.find((podcast) => podcast.id === selectedPodcastId) || topPodcasts[0];
   const filteredPodcasts = topPodcasts.filter((podcast) => {
     const lowered = query.trim().toLowerCase();
     if (!lowered) return true;
@@ -99,36 +95,24 @@ export function SearchView() {
         const podcasts = Array.isArray(result.podcasts) ? result.podcasts.filter((podcast: TopPodcast) => podcast.audioUrl) : [];
         if (podcasts.length > 0) {
           setTopPodcasts(podcasts);
-          setSelectedPodcastId((current) => (podcasts.some((podcast: TopPodcast) => podcast.id === current) ? current : podcasts[0].id));
+
         }
       })
       .catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    if (!audioRef.current) return;
-    audioRef.current.load();
-  }, [selectedPodcast?.audioUrl]);
-
-  const playPodcast = (podcast: TopPodcast) => {
-    setSelectedPodcastId(podcast.id);
-    window.setTimeout(() => {
-      audioRef.current?.play().catch(() => undefined);
-    }, 100);
-  };
-
   return (
-    <div className="max-w-4xl mx-auto p-6 pb-32">
-      <div className="sticky top-0 z-10 bg-[#08091a]/95 backdrop-blur-md pt-2 pb-6">
+    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
+      <div className="border-b border-white/10 pb-5">
         <div className="relative">
           <input
             type="text"
             placeholder="Search users, podcasts, topics..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 pl-14 pr-6 text-white placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all shadow-[0_4px_20px_rgba(0,0,0,0.2)]"
+            className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-white placeholder:text-zinc-500 outline-none focus:border-brand-400"
           />
-          <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-6 h-6 text-gray-400" />
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 size-5 text-zinc-400" />
         </div>
 
         <div className="flex flex-col sm:flex-row gap-4 mt-4 justify-between items-start sm:items-center">
@@ -166,31 +150,13 @@ export function SearchView() {
               <Mic2 className="w-5 h-5 text-brand-400" /> Top Podcasts
             </h3>
 
-            {selectedPodcast && (
-              <div className="rounded-2xl border border-brand-500/20 bg-brand-500/10 p-4 space-y-3">
-                <div className="flex items-start gap-3">
-                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-brand-500 to-pink-600 flex items-center justify-center shrink-0">
-                    <Volume2 className="w-6 h-6 text-white" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs uppercase tracking-widest text-brand-200 font-bold">Now selected</div>
-                    <h4 className="font-bold text-white truncate">{selectedPodcast.showTitle}</h4>
-                    <p className="text-sm text-gray-300 line-clamp-2">{selectedPodcast.episodeTitle}</p>
-                  </div>
-                </div>
-                <audio ref={audioRef} controls preload="none" className="w-full">
-                  <source src={selectedPodcast.audioUrl} />
-                </audio>
-              </div>
-            )}
-
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {filteredPodcasts.map((podcast, index) => {
-                const isSelected = selectedPodcast?.id === podcast.id;
+                const isSelected = playingId === podcast.id;
                 return (
                   <button
                     key={podcast.id}
-                    onClick={() => playPodcast(podcast)}
+                    onClick={() => onPlayEpisode(podcast)}
                     className={`bg-white/5 border rounded-2xl p-4 flex gap-4 hover:bg-white/10 transition-colors cursor-pointer group text-left ${isSelected ? "border-brand-400/70" : "border-white/5"}`}
                     aria-label={`Play ${podcast.showTitle}`}
                   >

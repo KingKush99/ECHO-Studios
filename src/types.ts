@@ -69,6 +69,7 @@ export interface PodcastMetadata {
   tagline: string;
   description: string;
   musicMood: string;
+  language?: string;
   episodeFormat?: string;
   speakers: Speaker[];
   chapters: Chapter[];
@@ -78,6 +79,19 @@ export interface PodcastMetadata {
   voiceReferences?: VoiceReference[];
   coverArt?: PodcastCover;
   researchSources?: ResearchSource[];
+}
+
+export type AudioProvider = "kokoro" | "chatterbox" | "piper" | "browser" | "elevenlabs";
+
+export interface AudioEngineStatus {
+  kokoroAvailable: boolean;
+  piperAvailable: boolean;
+  chatterboxAvailable: boolean;
+  elevenLabsAvailable: boolean;
+  elevenLabsModelId: string;
+  elevenLabsDefaultVoiceId: string;
+  voices: Array<{ id: string; name: string }>;
+  elevenLabsVoices: Array<{ id: string; name: string; category: string }>;
 }
 
 export interface PresetTopic {

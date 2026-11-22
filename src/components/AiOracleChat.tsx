@@ -102,7 +102,7 @@ export function AiOracleChat({ isOpen, onClose }: { isOpen: boolean, onClose: ()
   };
 
   return (
-    <div className="fixed top-0 bottom-0 left-4 my-auto w-[500px] h-[500px] rounded-2xl bg-[#090b16] z-50 shadow-[0_10px_50px_rgba(0,0,0,0.8)] border border-white/10 flex flex-col overflow-hidden transform transition-all">
+    <div role="region" aria-label="AI assistant" className="assistant-panel fixed right-4 z-[60] flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#171322] shadow-2xl">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-white/5 bg-[#101223]">
         <div className="flex items-center gap-3">

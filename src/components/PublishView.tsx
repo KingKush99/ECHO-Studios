@@ -371,15 +371,13 @@ export function PublishView({ data }: { data: PodcastMetadata | null }) {
 
   if (!data) {
     return (
-      <div className="max-w-5xl mx-auto p-6 pb-32 space-y-8">
-        <div className="text-center space-y-2 mb-8">
+      <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:px-6">
+        <div className="space-y-2">
           <h1 className="text-3xl font-display font-bold text-white tracking-tight">Publish Episode</h1>
           <p className="text-gray-400 text-sm">Choose a platform now. Generate an episode when you are ready to export RSS, artwork, transcript, and metadata.</p>
         </div>
 
-        {gatewayPanel}
-
-        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-5">
+        <div className="border-l-2 border-amber-400/50 py-2 pl-4">
           <div className="flex items-start gap-3">
             <UploadCloud className="mt-0.5 h-5 w-5 shrink-0 text-amber-200" />
             <div>
@@ -390,6 +388,11 @@ export function PublishView({ data }: { data: PodcastMetadata | null }) {
             </div>
           </div>
         </div>
+
+        <details className="border-b border-white/10 pb-4">
+          <summary className="cursor-pointer text-sm font-medium text-zinc-300">Publishing gateway settings</summary>
+          <div className="mt-3">{gatewayPanel}</div>
+        </details>
 
         <div className="space-y-4">
           <h3 className="text-sm font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
@@ -477,15 +480,18 @@ export function PublishView({ data }: { data: PodcastMetadata | null }) {
   ];
 
   return (
-    <div className="max-w-5xl mx-auto p-6 pb-32 space-y-8">
-      <div className="text-center space-y-2 mb-8">
+    <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:px-6">
+      <div className="space-y-2">
         <h1 className="text-3xl font-display font-bold text-white tracking-tight">Publish Episode</h1>
         <p className="text-gray-400 text-sm">Prepare a feed, export your assets, then submit to any podcast platform.</p>
       </div>
 
-      {gatewayPanel}
+      <details className="border-b border-white/10 pb-4">
+        <summary className="cursor-pointer text-sm font-medium text-zinc-300">Publishing gateway settings</summary>
+        <div className="mt-3">{gatewayPanel}</div>
+      </details>
 
-      <div className={`rounded-2xl border p-4 sm:p-5 ${internetReady ? "border-emerald-500/20 bg-emerald-500/10" : "border-amber-500/20 bg-amber-500/10"}`}>
+      <div className={`border-l-2 py-2 pl-4 ${internetReady ? "border-emerald-400/50" : "border-amber-400/50"}`}>
         <div className="flex flex-col lg:flex-row lg:items-start gap-4">
           <div className="flex-1">
             <h2 className={`text-sm font-bold uppercase tracking-widest flex items-center gap-2 ${internetReady ? "text-emerald-200" : "text-amber-200"}`}>
@@ -502,7 +508,7 @@ export function PublishView({ data }: { data: PodcastMetadata | null }) {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 lg:w-[520px]">
             {readinessItems.map((item) => (
-              <div key={item.label} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+              <div key={item.label} className="py-2">
                 <div className="flex items-center gap-2 text-sm font-bold text-white">
                   {item.ready ? <Check className="w-4 h-4 text-emerald-300" /> : <AlertCircle className="w-4 h-4 text-amber-300" />}
                   {item.label}

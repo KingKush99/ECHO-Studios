@@ -8,9 +8,11 @@ import { test } from "node:test";
 test("podcast and local voice generation API", async (t) => {
   const initialDirectory = process.cwd();
   const testDirectory = await mkdtemp(path.join(tmpdir(), "echo-studios-test-"));
+  let closeServer: (() => Promise<void>) | undefined;
   t.after(async () => {
+    await closeServer?.();
     process.chdir(initialDirectory);
-    await rm(testDirectory, { recursive: true, force: true });
+    await rm(testDirectory, { recursive: true, force: true, maxRetries: 3 });
   });
   process.chdir(testDirectory);
   const worker = path.join(testDirectory, "chatterbox-stub.cjs");
@@ -38,14 +40,18 @@ test("podcast and local voice generation API", async (t) => {
     fs.writeFileSync(args[args.indexOf("--out") + 1], wav);
   `);
   process.env.VERCEL = "1";
+  process.env.KOKORO_ENABLED = "1";
   process.env.CHATTERBOX_DIR = chatterboxDir;
   process.env.CHATTERBOX_SCRIPT = worker;
   process.env.CHATTERBOX_PYTHON = process.execPath;
   process.env.ELEVENLABS_API_KEY = "test-key";
   const { createEchoApp } = await import("./server");
   const server = (await createEchoApp({ assetsMode: "api" })).listen(0, "127.0.0.1");
+  closeServer = () => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  });
   await once(server, "listening");
-  t.after(() => server.close());
 
   const address = server.address();
   assert.ok(address && typeof address !== "string");
@@ -117,6 +123,7 @@ test("podcast and local voice generation API", async (t) => {
 
     const episode = await generateEpisode(300);
     assert.match(episode.tagline, /Written with local AI/);
+    assert.equal(episode.language, "French");
     assert.equal(calls.length, 2);
     assert.equal(calls[0].model, "test-model");
     const first = JSON.parse(calls[0].messages[1].content);
@@ -193,5 +200,15 @@ test("podcast and local voice generation API", async (t) => {
     assert.equal(result.status, 200);
     assert.equal((await result.json()).voice.provider, "chatterbox");
     assert.equal(hostedVoiceCalls, 0);
+  });
+
+  await t.test("reports that this Kokoro runtime supports English voices", async () => {
+    const response = await request(`http://127.0.0.1:${port}/api/generate-audio`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "kokoro", language: "French", script: [{ dialogue: "Bonjour." }] }),
+    });
+    assert.equal(response.status, 501);
+    assert.match((await response.json()).error, /English episodes/);
   });
 });

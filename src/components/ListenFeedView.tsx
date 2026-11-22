@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, ArrowLeft, ExternalLink, Eye, Loader2, Play, Radio, RefreshCw, Search, Send, Volume2 } from "lucide-react";
 
-type LivePodcast = {
+export type LivePodcast = {
   id: string;
   showTitle: string;
   episodeTitle: string;
   publisher: string;
   category: string;
   description: string;
-  feedUrl: string;
-  homeUrl: string;
-  episodeUrl: string;
-  imageUrl: string;
+  feedUrl?: string;
+  homeUrl?: string;
+  episodeUrl?: string;
+  imageUrl?: string;
   audioUrl: string;
   duration: string;
   listeners: number;
@@ -45,11 +45,10 @@ function normalizeDuration(value: string) {
   return value;
 }
 
-export function ListenFeedView() {
-  const audioRef = useRef<HTMLAudioElement>(null);
+export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisode: (episode: LivePodcast) => void; initialEpisode: LivePodcast | null }) {
   const [podcasts, setPodcasts] = useState<LivePodcast[]>([]);
-  const [selectedId, setSelectedId] = useState("");
-  const [openedPodcastId, setOpenedPodcastId] = useState("");
+  const [selectedId, setSelectedId] = useState(initialEpisode?.id || "");
+  const [openedPodcastId, setOpenedPodcastId] = useState(initialEpisode?.id || "");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
@@ -58,7 +57,8 @@ export function ListenFeedView() {
   const [chatDraft, setChatDraft] = useState("");
   const [chatMessages, setChatMessages] = useState(DEFAULT_CHAT_MESSAGES);
 
-  const openedPodcast = openedPodcastId ? podcasts.find((podcast) => podcast.id === openedPodcastId) || null : null;
+  const openedPodcast = openedPodcastId ? podcasts.find((podcast) => podcast.id === openedPodcastId)
+    || (initialEpisode?.id === openedPodcastId ? initialEpisode : null) : null;
   const categories = useMemo(() => ["All", ...Array.from(new Set(podcasts.map((podcast) => podcast.category))).filter(Boolean)], [podcasts]);
   const filtered = podcasts.filter((podcast) => {
     const query = searchQuery.trim().toLowerCase();
@@ -97,11 +97,6 @@ export function ListenFeedView() {
     loadPodcasts();
   }, []);
 
-  useEffect(() => {
-    if (!audioRef.current || !openedPodcast) return;
-    audioRef.current.load();
-  }, [openedPodcast?.audioUrl]);
-
   const selectPodcast = (podcast: LivePodcast) => {
     setSelectedId(podcast.id);
     setOpenedPodcastId(podcast.id);
@@ -109,13 +104,10 @@ export function ListenFeedView() {
       { id: `${podcast.id}-room`, author: "ECHO", text: `Opened ${podcast.showTitle}. You are now in the live chat.`, time: "Now" },
       ...DEFAULT_CHAT_MESSAGES,
     ]);
-    window.setTimeout(() => {
-      audioRef.current?.play().catch(() => {});
-    }, 100);
+    onPlayEpisode(podcast);
   };
 
   const closeRoom = () => {
-    audioRef.current?.pause();
     setOpenedPodcastId("");
     setChatDraft("");
   };
@@ -128,15 +120,10 @@ export function ListenFeedView() {
   };
 
   return (
-    <div className="max-w-6xl mx-auto p-4 sm:p-6 pb-36 space-y-6">
+    <div className="mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6">
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
         <div className="space-y-2">
-          <div className="inline-flex items-center gap-2 rounded-full border border-pink-400/30 bg-pink-500/10 px-3 py-1 text-xs font-bold uppercase tracking-widest text-pink-100">
-            <span className="h-2 w-2 rounded-full bg-pink-400 shadow-[0_0_12px_rgba(244,114,182,0.9)]" />
-            Live
-          </div>
           <h1 className="text-3xl font-display font-bold text-white tracking-tight">Live Podcasts</h1>
-          <p className="text-sm text-gray-400">Playable rooms from live public feeds plus ECHO preset rooms when feeds are unavailable.</p>
         </div>
 
         <button
@@ -150,15 +137,15 @@ export function ListenFeedView() {
       </div>
 
       {openedPodcast ? (
-        <section className="min-h-[calc(100vh-10rem)] rounded-3xl border border-white/10 bg-black/25 p-4 sm:p-5">
+        <section>
           <div className="mb-5 flex items-center justify-between gap-3">
-            <button onClick={closeRoom} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-bold text-white hover:bg-white/10">
+            <button onClick={closeRoom} className="inline-flex h-10 items-center gap-2 rounded-full bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-500">
               <ArrowLeft className="h-4 w-4" /> Back to live
             </button>
             <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-bold text-emerald-200">{formatListeners(openedPodcast.listeners)} listening</span>
           </div>
 
-          <div className="grid min-h-[calc(100vh-16rem)] grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
             <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-slate-950">
               {openedPodcast.imageUrl ? (
                 <img src={openedPodcast.imageUrl} alt={openedPodcast.showTitle} className="absolute inset-0 h-full w-full object-cover opacity-80" />
@@ -181,10 +168,8 @@ export function ListenFeedView() {
               </div>
             </div>
 
-            <aside className="flex min-h-[58vh] flex-col rounded-3xl border border-white/10 bg-[#101126] p-4">
-              <audio ref={audioRef} controls className="mb-3 w-full" preload="none">
-                <source src={openedPodcast.audioUrl} />
-              </audio>
+            <aside className="flex flex-col lg:border-l lg:border-white/10 lg:pl-5">
+              {!initialEpisode && <button onClick={() => onPlayEpisode(openedPodcast)} className="mb-3 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold hover:bg-brand-500"><Play className="size-4" /> Play episode</button>}
               <div className="mb-4 grid grid-cols-2 gap-2">
                 <a href={openedPodcast.episodeUrl || openedPodcast.homeUrl || openedPodcast.audioUrl} target="_blank" rel="noreferrer" className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs font-bold text-white hover:bg-white/15">
                   Episode <ExternalLink className="ml-1 inline h-3.5 w-3.5" />
@@ -194,10 +179,9 @@ export function ListenFeedView() {
                 </a>
               </div>
 
-              <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div className="flex min-h-0 flex-1 flex-col border-t border-white/10 pt-4">
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="text-sm font-bold text-white">Live chat</h3>
-                  <span className="rounded-full bg-black/25 px-2 py-0.5 text-xs font-bold text-gray-300">Room chat</span>
                 </div>
                 <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
                   {chatMessages.map((message) => (

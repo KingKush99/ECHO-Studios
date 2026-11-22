@@ -3,14 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { Bot, MessageSquare, PlayCircle, PlusCircle, Search, Share, Sparkles, UserCircle } from "lucide-react";
+import { Bot, MessageSquare, PlayCircle, PlusCircle, Search, Share, UserCircle } from "lucide-react";
 
-import { PodcastMetadata } from "./types";
+import { type AudioEngineStatus, type AudioProvider, type PodcastMetadata } from "./types";
+import { getKokoroVoices, getSpeechLocale } from "./voice-options";
 import { CreateView } from "./components/CreateView";
-import { ListenFeedView } from "./components/ListenFeedView";
+import { ListenFeedView, type LivePodcast } from "./components/ListenFeedView";
 import { PublishView } from "./components/PublishView";
 import { ProfileView } from "./components/RealProfileView";
 import { PodcastPlayer } from "./components/PodcastPlayer";
+import { PlaybackBar } from "./components/PlaybackBar";
 import { SearchView } from "./components/SearchView";
 import { DmChat } from "./components/DmChat";
 import { AiOracleChat } from "./components/AiOracleChat";
@@ -18,20 +20,7 @@ import echoLogoUrl from "./assets/images/echo_studios_favicon_1782358750086.jpg"
 
 type ActiveTab = "create" | "listen" | "publish" | "profile" | "search";
 type SpeechStatus = "idle" | "playing" | "paused";
-type VoiceMode = "narrator" | "cast";
-type AudioEngineStatus = {
-  piperAvailable: boolean;
-  chatterboxAvailable: boolean;
-  elevenLabsAvailable: boolean;
-  elevenLabsModelId: string;
-  elevenLabsDefaultVoiceId: string;
-  voices: Array<{ id: string; name: string }>;
-  elevenLabsVoices: Array<{ id: string; name: string; category: string }>;
-  installCommand: string;
-  chatterboxInstallCommand: string;
-};
-type AudioProvider = "elevenlabs" | "chatterbox" | "piper";
-type LocalAudioProvider = Exclude<AudioProvider, "elevenlabs">;
+type LocalAudioProvider = Exclude<AudioProvider, "elevenlabs" | "browser">;
 type PlaybackChunk = {
   startTime: number;
   endTime: number;
@@ -39,6 +28,15 @@ type PlaybackChunk = {
   provider: LocalAudioProvider;
 };
 const PODCAST_LIBRARY_STORAGE_KEY = "echo.podcastLibrary.v1";
+
+function preferredAudioProvider(engine: AudioEngineStatus | null, episode: PodcastMetadata | null): AudioProvider {
+  if (!getKokoroVoices(episode?.language).length) return "browser";
+  if (engine?.chatterboxAvailable && episode?.voiceReferences?.some((voice) => voice.consentConfirmed && voice.dataUrl)) return "chatterbox";
+  if (engine?.kokoroAvailable) return "kokoro";
+  if (engine?.chatterboxAvailable) return "chatterbox";
+  if (engine?.piperAvailable) return "piper";
+  return "browser";
+}
 
 function getPodcastDuration(data: PodcastMetadata | null) {
   if (!data || data.script.length === 0) return 0;
@@ -67,17 +65,23 @@ export default function App() {
   const [isDmOpen, setIsDmOpen] = useState(false);
   const [isAiChatOpen, setIsAiChatOpen] = useState(false);
   const [isPodcastPlayerOpen, setIsPodcastPlayerOpen] = useState(false);
+  const [isPlaybackBarOpen, setIsPlaybackBarOpen] = useState(false);
+  const [liveEpisode, setLiveEpisode] = useState<LivePodcast | null>(null);
+  const [liveSection, setLiveSection] = useState<"listen" | "search">("listen");
+  const [liveTime, setLiveTime] = useState(0);
+  const [liveDuration, setLiveDuration] = useState(0);
+  const [livePlaying, setLivePlaying] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [speechStatus, setSpeechStatus] = useState<SpeechStatus>("idle");
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [preferredVoiceURI, setPreferredVoiceURI] = useState("");
-  const [voiceMode, setVoiceMode] = useState<VoiceMode>("narrator");
   const [playbackRate, setPlaybackRate] = useState(1);
   const [audioEngine, setAudioEngine] = useState<AudioEngineStatus | null>(null);
-  const [audioProvider, setAudioProvider] = useState<AudioProvider>("chatterbox");
+  const [audioProvider, setAudioProvider] = useState<AudioProvider>("browser");
+  const [hostVoices, setHostVoices] = useState<Record<string, string>>({});
   const [selectedNeuralVoice, setSelectedNeuralVoice] = useState("");
   const [selectedElevenVoice, setSelectedElevenVoice] = useState("");
   const [neuralAudioUrl, setNeuralAudioUrl] = useState<string | null>(null);
@@ -86,6 +90,8 @@ export default function App() {
 
   const podcastDataRef = useRef<PodcastMetadata | null>(null);
   const neuralAudioRef = useRef<HTMLAudioElement | null>(null);
+  const liveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRequestRef = useRef<AbortController | null>(null);
   const autoPlayNeuralAudioRef = useRef(false);
   const isGeneratingNeuralAudioRef = useRef(false);
   const playbackChunkRef = useRef<PlaybackChunk | null>(null);
@@ -142,10 +148,11 @@ export default function App() {
         if (data.voices?.[0]?.id) setSelectedNeuralVoice(data.voices[0].id);
         if (data.elevenLabsVoices?.[0]?.id) setSelectedElevenVoice(data.elevenLabsVoices[0].id);
         else if (data.elevenLabsDefaultVoiceId) setSelectedElevenVoice(data.elevenLabsDefaultVoiceId);
-        setAudioProvider(data.chatterboxAvailable ? "chatterbox" : "piper");
+        setAudioProvider(preferredAudioProvider(data, podcastDataRef.current));
       })
       .catch(() => {
         setAudioEngine({
+          kokoroAvailable: false,
           piperAvailable: false,
           chatterboxAvailable: false,
           elevenLabsAvailable: false,
@@ -153,10 +160,8 @@ export default function App() {
           elevenLabsDefaultVoiceId: "",
           voices: [],
           elevenLabsVoices: [],
-          installCommand: ".\\install-piper.ps1",
-          chatterboxInstallCommand: ".\\install-chatterbox.ps1",
         });
-        setAudioProvider("piper");
+        setAudioProvider("browser");
       });
   }, []);
 
@@ -171,7 +176,8 @@ export default function App() {
     if (neuralAudioRef.current) {
       neuralAudioRef.current.playbackRate = playbackRate;
     }
-  }, [playbackRate, neuralAudioUrl]);
+    if (liveAudioRef.current) liveAudioRef.current.playbackRate = playbackRate;
+  }, [playbackRate, neuralAudioUrl, liveEpisode]);
 
   useEffect(() => {
     if (!neuralAudioUrl) return;
@@ -233,6 +239,11 @@ export default function App() {
   }
 
   function revokeNeuralAudio() {
+    audioRequestRef.current?.abort();
+    audioRequestRef.current = null;
+    isGeneratingNeuralAudioRef.current = false;
+    setIsGeneratingNeuralAudio(false);
+    autoPlayNeuralAudioRef.current = false;
     if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
     setNeuralAudioUrl(null);
     setNeuralAudioError(null);
@@ -266,7 +277,6 @@ export default function App() {
   function scoreVoice(voice: SpeechSynthesisVoice) {
     const name = `${voice.name} ${voice.voiceURI} ${voice.lang}`.toLowerCase();
     let score = 0;
-    if (voice.lang.toLowerCase().startsWith("en")) score += 40;
     if (/(natural|neural|online|premium)/.test(name)) score += 70;
     if (/(microsoft|google|apple)/.test(name)) score += 30;
     if (/(jenny|aria|guy|sonia|ryan|libby|samantha|daniel|zira|david)/.test(name)) score += 20;
@@ -280,14 +290,12 @@ export default function App() {
     const voices = availableVoices.length > 0 ? availableVoices : window.speechSynthesis.getVoices();
     if (voices.length === 0) return null;
 
-    const preferredVoice = preferredVoiceURI ? voices.find((voice) => voice.voiceURI === preferredVoiceURI) : null;
     const data = podcastDataRef.current;
     const speaker = data?.speakers.find((item) => item.name === speakerName);
     const speakerIndex = Math.max(0, data?.speakers.findIndex((item) => item.name === speakerName) ?? 0);
-    if (preferredVoice && voiceMode === "narrator" && speakerIndex === 0) return preferredVoice;
-
-    const englishVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith("en"));
-    const usableVoices = englishVoices.length > 0 ? englishVoices : voices;
+    const language = getSpeechLocale(data?.language).split("-")[0];
+    const matchingVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith(language));
+    const usableVoices = matchingVoices.length > 0 ? matchingVoices : voices;
     const speakerStyle = `${speaker?.gender || ""} ${speaker?.style || ""}`.toLowerCase();
     const rankedVoices = [...usableVoices].sort((a, b) => {
       const aName = `${a.name} ${a.voiceURI}`.toLowerCase();
@@ -295,7 +303,7 @@ export default function App() {
       const voiceFit = (name: string) => {
         let fit = 0;
         if (speakerStyle.includes("female") && /(jenny|aria|samantha|sonia|libby|zira|amy|female)/.test(name)) fit += 24;
-        if (speakerStyle.includes("male") && /(guy|ryan|david|daniel|mark|male)/.test(name)) fit += 24;
+        if (speaker?.gender === "male" && /(guy|ryan|david|daniel|mark|\bmale\b)/.test(name)) fit += 24;
         if (speakerStyle.includes("skeptical") && /(david|guy|mark|ryan)/.test(name)) fit += 12;
         if (speakerStyle.includes("enthusiastic") && /(jenny|aria|amy|samantha)/.test(name)) fit += 12;
         if (speakerStyle.includes("intellectual") && /(daniel|david|ryan|guy)/.test(name)) fit += 10;
@@ -303,11 +311,6 @@ export default function App() {
       };
       return scoreVoice(b) + voiceFit(bName) - (scoreVoice(a) + voiceFit(aName));
     });
-
-    if (preferredVoice && voiceMode === "cast") {
-      const otherVoices = rankedVoices.filter((voice) => voice.voiceURI !== preferredVoice.voiceURI);
-      rankedVoices.splice(0, rankedVoices.length, preferredVoice, ...otherVoices);
-    }
 
     const topVoices = rankedVoices.slice(0, Math.min(Math.max(4, data?.speakers.length || 2), rankedVoices.length));
     return topVoices[(speakerIndex + getHash(speakerName)) % topVoices.length];
@@ -363,6 +366,7 @@ export default function App() {
 
     const line = data.script[index];
     const utterance = new SpeechSynthesisUtterance(prepareDialogueForSpeech(line.dialogue));
+    utterance.lang = getSpeechLocale(data.language);
     const voice = chooseVoice(line.speakerName);
     const speechSettings = getSpeechSettings(line.speakerName, index);
 
@@ -456,11 +460,15 @@ export default function App() {
     }
   }
 
-  function handleGenerated(data: PodcastMetadata) {
+  function loadPodcast(data: PodcastMetadata) {
+    liveAudioRef.current?.pause();
+    setLiveEpisode(null);
     cancelSpeech(true);
     revokeNeuralAudio();
     podcastDataRef.current = data;
     setPodcastData(data);
+    setAudioProvider(preferredAudioProvider(audioEngine, data));
+    setHostVoices({});
     const clonedReference = data.voiceReferences?.find((reference) => reference.clonedVoiceId);
     if (clonedReference?.clonedVoiceId && clonedReference.cloneProvider === "elevenlabs" && audioEngine?.elevenLabsAvailable) {
       const clonedVoice = {
@@ -477,10 +485,6 @@ export default function App() {
       } : current);
       setSelectedElevenVoice(clonedVoice.id);
     }
-    setPodcastLibrary((current) => {
-      const key = getPodcastLibraryKey(data);
-      return [data, ...current.filter((item) => getPodcastLibraryKey(item) !== key)].slice(0, 24);
-    });
     const nextDuration = getPodcastDuration(data);
     durationRef.current = nextDuration;
     setDuration(nextDuration);
@@ -488,15 +492,16 @@ export default function App() {
     currentTimeRef.current = 0;
     setCurrentLineIndex(0);
     currentLineIndexRef.current = 0;
-    setIsPodcastPlayerOpen(true);
-    setActiveTab("create");
+    setIsPodcastPlayerOpen(false);
+    setIsPlaybackBarOpen(true);
+  }
 
-    if (audioProvider === "piper" && audioEngine?.piperAvailable) {
-      continueChunkPlaybackRef.current = false;
-      window.setTimeout(() => {
-        void generateLocalPlaybackChunk(0, "piper");
-      }, 0);
-    }
+  function handleGenerated(data: PodcastMetadata) {
+    loadPodcast(data);
+    setPodcastLibrary((current) => {
+      const key = getPodcastLibraryKey(data);
+      return [data, ...current.filter((item) => getPodcastLibraryKey(item) !== key)].slice(0, 24);
+    });
   }
 
   function handlePodcastUpdated(data: PodcastMetadata) {
@@ -507,10 +512,51 @@ export default function App() {
     });
   }
 
-  function closePodcastPlayer() {
-    autoPlayNeuralAudioRef.current = false;
+  function closePlayback() {
+    liveAudioRef.current?.pause();
+    setLiveEpisode(null);
     cancelSpeech(true);
+    revokeNeuralAudio();
     setIsPodcastPlayerOpen(false);
+    setIsPlaybackBarOpen(false);
+  }
+
+  function navigate(tab: ActiveTab) {
+    setIsPodcastPlayerOpen(false);
+    setActiveTab(tab);
+    window.scrollTo(0, 0);
+  }
+
+  function openEpisode(episode: PodcastMetadata) {
+    if (liveEpisode || episode !== podcastData || !isPlaybackBarOpen) loadPodcast(episode);
+    setIsPodcastPlayerOpen(true);
+  }
+
+  function playLiveEpisode(episode: LivePodcast, section: "listen" | "search" = "listen") {
+    setLiveSection(section);
+    if (liveEpisode?.id === episode.id && liveAudioRef.current) {
+      void liveAudioRef.current.play().catch(() => {});
+      return;
+    }
+    closePlayback();
+    setLiveTime(0);
+    setLiveDuration(0);
+    setLivePlaying(false);
+    setLiveError(null);
+    setLiveEpisode(episode);
+    setIsPlaybackBarOpen(true);
+  }
+
+  function toggleLivePlayback() {
+    const audio = liveAudioRef.current;
+    if (!audio) return;
+    if (!audio.paused) audio.pause();
+    else void audio.play().catch(() => setLiveError("This episode could not be played."));
+  }
+
+  function seekLivePlayback(time: number) {
+    const audio = liveAudioRef.current;
+    if (audio && Number.isFinite(audio.duration)) audio.currentTime = Math.max(0, Math.min(time, audio.duration));
   }
 
   function changeAudioProvider(provider: AudioProvider) {
@@ -520,8 +566,23 @@ export default function App() {
     setAudioProvider(provider);
   }
 
+  function changeVoice(voice: string) {
+    cancelSpeech(false);
+    revokeNeuralAudio();
+    if (audioProvider === "elevenlabs") setSelectedElevenVoice(voice);
+    else setSelectedNeuralVoice(voice);
+  }
+
+  function changeHostVoice(speaker: string, voice: string) {
+    cancelSpeech(false);
+    revokeNeuralAudio();
+    setHostVoices((current) => ({ ...current, [speaker]: voice }));
+  }
+
   function canGenerateHighQualityAudio(data: PodcastMetadata | null) {
     if (!data || !audioEngine) return false;
+    if (audioProvider === "browser") return false;
+    if (audioProvider === "kokoro") return audioEngine.kokoroAvailable && getKokoroVoices(data.language).length > 0;
     if (audioProvider === "elevenlabs") return audioEngine.elevenLabsAvailable;
     if (audioProvider === "chatterbox") return audioEngine.chatterboxAvailable;
     return audioEngine.piperAvailable;
@@ -559,7 +620,8 @@ export default function App() {
       return;
     }
 
-    if (audioProvider !== "elevenlabs" && canGenerateHighQualityAudio(podcastDataRef.current)) {
+    if (audioProvider !== "elevenlabs" && audioProvider !== "browser" && canGenerateHighQualityAudio(podcastDataRef.current)) {
+      if (currentTimeRef.current >= durationRef.current - 0.5) setPlaybackTime(0);
       continueChunkPlaybackRef.current = true;
       void generateLocalPlaybackChunk(currentLineIndexRef.current, audioProvider);
       return;
@@ -660,13 +722,9 @@ export default function App() {
     }
   }
 
-  function seekRelative(seconds: number) {
-    seekTo(currentTimeRef.current + seconds);
-  }
-
   async function generateLocalPlaybackChunk(startLineIndex: number, provider: LocalAudioProvider) {
     const data = podcastDataRef.current;
-    const available = provider === "chatterbox" ? audioEngine?.chatterboxAvailable : audioEngine?.piperAvailable;
+    const available = provider === "kokoro" ? audioEngine?.kokoroAvailable : provider === "chatterbox" ? audioEngine?.chatterboxAvailable : audioEngine?.piperAvailable;
     if (!data || !available || isGeneratingNeuralAudioRef.current) return;
 
     const boundedStartIndex = Math.max(0, Math.min(startLineIndex, data.script.length - 1));
@@ -688,6 +746,8 @@ export default function App() {
     const endTime = lastLine.estimatedStartSeconds + lastLine.durationSeconds;
 
     isGeneratingNeuralAudioRef.current = true;
+    const controller = new AbortController();
+    audioRequestRef.current = controller;
     setIsGeneratingNeuralAudio(true);
     setNeuralAudioError(null);
     setSpeechError(null);
@@ -696,18 +756,21 @@ export default function App() {
     try {
       const response = await fetch("/api/generate-audio", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           script: chunkScript,
           speakers: data.speakers,
+          language: data.language,
           maxSeconds: Math.ceil(coveredSeconds),
           provider,
           voiceId: provider === "piper" ? selectedNeuralVoice : undefined,
+          voiceOverrides: provider === "kokoro" ? hostVoices : undefined,
           voiceReferences: provider === "chatterbox" ? data.voiceReferences : undefined,
         }),
       });
       const result = await response.json();
-      if (podcastDataRef.current !== data) return;
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(result.error || "Fast playback audio failed.");
 
       if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
@@ -722,13 +785,16 @@ export default function App() {
       setActiveLine(boundedStartIndex);
       setPlaybackStatus("idle");
     } catch (error: any) {
-      if (podcastDataRef.current !== data) return;
+      if (controller.signal.aborted) return;
       continueChunkPlaybackRef.current = false;
       setNeuralAudioError(error.message || "Fast playback audio is not available.");
-      setSpeechError("Playback audio could not be prepared. Open Audio Settings and try again.");
+      setSpeechError("Audio could not be prepared. Open the episode to change voices or retry.");
     } finally {
-      isGeneratingNeuralAudioRef.current = false;
-      setIsGeneratingNeuralAudio(false);
+      if (audioRequestRef.current === controller) {
+        audioRequestRef.current = null;
+        isGeneratingNeuralAudioRef.current = false;
+        setIsGeneratingNeuralAudio(false);
+      }
     }
   }
 
@@ -762,6 +828,8 @@ export default function App() {
     if (!data || isGeneratingNeuralAudioRef.current) return;
 
     isGeneratingNeuralAudioRef.current = true;
+    const controller = new AbortController();
+    audioRequestRef.current = controller;
     playbackChunkRef.current = null;
     continueChunkPlaybackRef.current = false;
     autoPlayNeuralAudioRef.current = autoPlay;
@@ -773,19 +841,22 @@ export default function App() {
     try {
       const response = await fetch("/api/generate-audio", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           script: data.script,
           speakers: data.speakers,
+          language: data.language,
           maxSeconds: Math.ceil(getPodcastDuration(data)),
           provider: audioProvider,
           voiceId: audioProvider === "elevenlabs" ? selectedElevenVoice : selectedNeuralVoice,
+          voiceOverrides: audioProvider === "kokoro" ? hostVoices : undefined,
           modelId: audioEngine?.elevenLabsModelId,
           voiceReferences: audioProvider === "chatterbox" ? data.voiceReferences : undefined,
         }),
       });
       const result = await response.json();
-      if (podcastDataRef.current !== data) return;
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(result.error || "Neural TTS failed.");
 
       if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
@@ -797,76 +868,56 @@ export default function App() {
       setPlaybackTime(0);
       setPlaybackStatus("idle");
     } catch (error: any) {
-      if (podcastDataRef.current !== data) return;
+      if (controller.signal.aborted) return;
       autoPlayNeuralAudioRef.current = false;
       setNeuralAudioError(error.message || "Neural TTS is not available.");
     } finally {
-      isGeneratingNeuralAudioRef.current = false;
-      setIsGeneratingNeuralAudio(false);
+      if (audioRequestRef.current === controller) {
+        audioRequestRef.current = null;
+        isGeneratingNeuralAudioRef.current = false;
+        setIsGeneratingNeuralAudio(false);
+      }
     }
   }
 
   return (
-    <div className="min-h-screen font-sans bg-[#08091a] text-white flex flex-col relative overflow-hidden">
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-brand-600/10 blur-[120px]" />
-        <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-purple-600/10 blur-[120px]" />
-      </div>
-
-      <button
-        onClick={() => setIsDmOpen(!isDmOpen)}
-        className="fixed right-4 top-1/2 -translate-y-1/2 z-50 p-4 bg-[#1a1b36] border border-white/10 rounded-full text-brand-400 hover:text-brand-300 hover:bg-[#25274d] transition-all shadow-[0_0_15px_rgba(139,92,246,0.6)]"
-        aria-label="Open direct messages"
-      >
-        <div className="relative flex items-center justify-center">
-          <MessageSquare className="w-6 h-6 scale-x-[-1]" />
-        </div>
-      </button>
-
-      <button
-        onClick={() => setIsAiChatOpen(!isAiChatOpen)}
-        className="fixed left-4 top-1/2 -translate-y-1/2 z-50 p-4 bg-[#1a1b36] border border-white/10 rounded-full text-[#8b5cf6] hover:text-[#a78bfa] hover:bg-[#25274d] transition-all shadow-[0_0_15px_rgba(59,130,246,0.6)]"
-        aria-label="Open AI assistant"
-      >
-        <div className="relative flex items-center justify-center">
-          <Bot className="w-6 h-6" />
-        </div>
-      </button>
-
-      <header className="sticky top-0 z-40 bg-[#08091a]/80 backdrop-blur-md border-b border-brand-500/20 px-6 py-4 flex items-center justify-between relative">
-        <div className="flex items-center gap-3 w-1/3">
-          <div>
-            <h1 className="text-xl font-display font-bold tracking-tight text-white flex gap-1">
-              <span className="text-brand-500">E</span>
-              <span className="text-brand-400">C</span>
-              <span className="text-brand-300">H</span>
-              <span className="text-brand-200">O</span>
-              <span className="ml-1 opacity-80 hidden sm:inline">Studios</span>
-            </h1>
-          </div>
-        </div>
-
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full overflow-hidden shadow-[0_0_15px_rgba(139,92,246,0.3)] bg-transparent">
-          <img src={echoLogoUrl} alt="ECHO Studios Logo" className="w-[115%] h-[115%] max-w-none -ml-[7.5%] -mt-[7.5%] rounded-full object-cover mix-blend-lighten" />
-        </div>
-
-        <div className="flex items-center justify-end gap-3 text-xs font-mono text-brand-200/50 w-1/3">
-          <span className="hidden md:flex items-center gap-2">
-            <Sparkles className="w-3 h-3" /> NATURAL.SPEECH
-          </span>
+    <div className="app-shell min-h-screen bg-[#100e18] font-sans text-white" data-playing-bar={isPlaybackBarOpen}>
+      <header className="sticky top-0 z-30 border-b border-white/10 bg-[#100e18]/95 backdrop-blur-sm">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:px-6">
+          <button onClick={() => navigate("create")} className="flex items-center gap-2 font-display text-lg font-bold tracking-tight" aria-label="Echo Studios home">
+            <img src={echoLogoUrl} alt="" className="size-8 rounded-full object-cover" /> Echo Studios
+          </button>
+          <button onClick={() => setIsDmOpen((open) => !open)} className="rounded-lg p-2 text-zinc-400 hover:bg-white/10 hover:text-white" aria-label="Open direct messages" aria-expanded={isDmOpen}>
+            <MessageSquare aria-hidden="true" className="size-5" />
+          </button>
         </div>
       </header>
-
-      <main className="flex-1 overflow-y-auto w-full max-w-7xl mx-auto relative z-10 custom-scrollbar">
-        {activeTab === "create" && <CreateView onGenerated={handleGenerated} onUpdated={handlePodcastUpdated} generatedPodcast={podcastData} />}
-        {activeTab === "listen" && <ListenFeedView />}
+      <main aria-hidden={isPodcastPlayerOpen || undefined} className="mx-auto w-full max-w-6xl pb-[var(--app-dock-height)]">
+        <div hidden={activeTab !== "create"}>
+          <CreateView onGenerated={handleGenerated} onUpdated={handlePodcastUpdated} generatedPodcast={podcastData} onOpenEpisode={() => podcastData && openEpisode(podcastData)} />
+        </div>
+        {activeTab === "listen" && <ListenFeedView onPlayEpisode={playLiveEpisode} initialEpisode={liveEpisode} />}
         {activeTab === "publish" && <PublishView data={podcastData} />}
-        {activeTab === "profile" && <ProfileView onHome={() => setActiveTab("create")} generatedPodcasts={podcastLibrary} />}
-        {activeTab === "search" && <SearchView />}
+        {activeTab === "profile" && <ProfileView onHome={() => navigate("create")} generatedPodcasts={podcastLibrary} onOpenDraft={openEpisode} />}
+        {activeTab === "search" && <SearchView onPlayEpisode={(episode) => playLiveEpisode(episode, "search")} playingId={liveEpisode?.id} />}
       </main>
 
       <DmChat isOpen={isDmOpen} onClose={() => setIsDmOpen(false)} />
+      <button onClick={() => setIsAiChatOpen((open) => !open)} className="fixed bottom-[calc(var(--app-dock-height)+0.75rem)] right-4 z-[55] grid size-11 place-items-center rounded-full bg-brand-600 text-white shadow-lg hover:bg-brand-500" aria-label={isAiChatOpen ? "Close AI assistant" : "Open AI assistant"} aria-expanded={isAiChatOpen}>
+        <Bot aria-hidden="true" className="size-5" />
+      </button>
       <AiOracleChat isOpen={isAiChatOpen} onClose={() => setIsAiChatOpen(false)} />
+
+      {liveEpisode && (
+        <audio key={liveEpisode.id} ref={liveAudioRef} src={liveEpisode.audioUrl} autoPlay preload="metadata"
+          onPlay={() => { setLivePlaying(true); setLiveError(null); }}
+          onPause={() => setLivePlaying(false)}
+          onEnded={() => setLivePlaying(false)}
+          onTimeUpdate={(event) => setLiveTime(event.currentTarget.currentTime)}
+          onDurationChange={(event) => setLiveDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+          onError={() => { setLivePlaying(false); setLiveError("This episode could not be played."); }}
+        />
+      )}
 
       {neuralAudioUrl && (
         <audio
@@ -898,61 +949,59 @@ export default function App() {
         />
       )}
 
-      <PodcastPlayer
-        data={isPodcastPlayerOpen ? podcastData : null}
-        playbackStatus={speechStatus}
-        playbackError={speechError}
-        speechSupported={speechSupported}
-        onPlayToggle={togglePlay}
-        onSeekRelative={seekRelative}
-        onSeekTo={seekTo}
-        playbackRate={playbackRate}
-        onPlaybackRateChange={changePlaybackRate}
-        currentTime={currentTime}
-        duration={duration}
+      {isPodcastPlayerOpen && podcastData && <PodcastPlayer
+        data={podcastData}
         currentLineIndex={currentLineIndex}
-        voices={availableVoices.map((voice) => ({
-          name: voice.name,
-          lang: voice.lang,
-          voiceURI: voice.voiceURI,
-          score: scoreVoice(voice),
-        }))}
-        preferredVoiceURI={preferredVoiceURI}
-        voiceMode={voiceMode}
-        onVoiceChange={setPreferredVoiceURI}
-        onVoiceModeChange={setVoiceMode}
+        onSeek={seekTo}
         audioEngine={audioEngine}
-        audioProvider={audioProvider}
-        selectedNeuralVoice={selectedNeuralVoice}
-        selectedElevenVoice={selectedElevenVoice}
-        neuralAudioAvailable={!!neuralAudioUrl}
-        isGeneratingNeuralAudio={isGeneratingNeuralAudio}
-        neuralAudioError={neuralAudioError}
-        onAudioProviderChange={changeAudioProvider}
-        onNeuralVoiceChange={setSelectedNeuralVoice}
-        onElevenVoiceChange={setSelectedElevenVoice}
-        onGenerateNeuralPreview={() => void generateNeuralPreview()}
-        onClose={closePodcastPlayer}
-      />
+        provider={audioProvider}
+        voiceId={audioProvider === "elevenlabs" ? selectedElevenVoice : selectedNeuralVoice}
+        voiceOverrides={hostVoices}
+        loading={isGeneratingNeuralAudio}
+        error={neuralAudioError}
+        onProviderChange={changeAudioProvider}
+        onVoiceChange={changeVoice}
+        onHostVoiceChange={changeHostVoice}
+        onGenerateAudio={() => void generateNeuralPreview()}
+        onClose={() => setIsPodcastPlayerOpen(false)}
+      />}
 
-      <nav className="fixed bottom-0 left-0 w-full z-50 bg-[#0c0d21]/90 backdrop-blur-xl border-t border-white/10 pb-safe pt-2">
-        <div className="w-full mx-auto flex items-stretch justify-between px-0 pb-4">
-          <NavItem icon={<UserCircle className="w-6 h-6" />} label="Profile" isActive={activeTab === "profile"} onClick={() => setActiveTab("profile")} />
-          <NavItem icon={<Search className="w-6 h-6" />} label="Search" isActive={activeTab === "search"} onClick={() => setActiveTab("search")} />
-          <NavItem icon={<PlusCircle className="w-6 h-6" />} label="Create" isActive={activeTab === "create"} onClick={() => setActiveTab("create")} />
-          <NavItem icon={<PlayCircle className="w-6 h-6" />} label="Live" isActive={activeTab === "listen"} onClick={() => setActiveTab("listen")} />
-          <NavItem icon={<Share className="w-6 h-6" />} label="Publish" isActive={activeTab === "publish"} onClick={() => setActiveTab("publish")} />
-        </div>
-      </nav>
+      <div className="fixed inset-x-0 bottom-0 z-50 border-t border-white/10 bg-[#15121e] pb-[env(safe-area-inset-bottom)]">
+        {isPlaybackBarOpen && (liveEpisode || podcastData) && <PlaybackBar
+          title={liveEpisode?.episodeTitle || podcastData?.title || "Podcast"}
+          cover={liveEpisode?.imageUrl || podcastData?.coverArt?.dataUrl}
+          time={liveEpisode ? liveTime : currentTime}
+          duration={liveEpisode ? liveDuration : duration}
+          speed={playbackRate}
+          playing={liveEpisode ? livePlaying : speechStatus === "playing"}
+          loading={!liveEpisode && isGeneratingNeuralAudio}
+          error={liveEpisode ? liveError : speechError}
+          onToggle={liveEpisode ? toggleLivePlayback : togglePlay}
+          onSeek={liveEpisode ? seekLivePlayback : seekTo}
+          onSpeed={changePlaybackRate}
+          onClose={closePlayback}
+          onDetails={() => liveEpisode ? navigate(liveSection) : setIsPodcastPlayerOpen((open) => !open)}
+        />}
+        <nav aria-label="Main navigation" className="mx-auto flex h-16 max-w-3xl items-stretch justify-between px-1 sm:px-4">
+          {([
+            ["profile", "Profile", UserCircle], ["search", "Search", Search], ["create", "Create", PlusCircle],
+            ["listen", "Live", PlayCircle], ["publish", "Publish", Share],
+          ] as const).map(([tab, label, Icon]) => (
+            <div key={tab} className="flex min-w-0 flex-1">
+              <NavItem icon={<Icon className="size-5" />} label={label} isActive={activeTab === tab && !isPodcastPlayerOpen} onClick={() => navigate(tab)} />
+            </div>
+          ))}
+        </nav>
+      </div>
     </div>
   );
 }
 
 function NavItem({ icon, label, isActive, onClick }: { icon: ReactNode; label: string; isActive: boolean; onClick: () => void }) {
   return (
-    <button onClick={onClick} className={`flex-1 flex flex-col items-center gap-1.5 p-2 transition-colors w-full ${isActive ? "text-brand-400" : "text-gray-500 hover:text-gray-300"}`}>
-      <div className={`${isActive ? "scale-110 drop-shadow-[0_0_8px_rgba(99,102,241,0.5)]" : ""} transition-all`}>{icon}</div>
-      <span className="text-[10px] font-medium tracking-wide">{label}</span>
+    <button onClick={onClick} aria-current={isActive ? "page" : undefined} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-1 px-1 transition-colors ${isActive ? "text-brand-300" : "text-zinc-400 hover:text-white"}`}>
+      {icon}
+      <span className="text-xs font-medium">{label}</span>
     </button>
   );
 }

@@ -8,6 +8,7 @@ import { randomUUID } from "crypto";
 import { createServer as createViteServer } from "vite";
 import { writePodcastWithOllama } from "./podcast-script";
 import { getKokoroVoices } from "./src/voice-options";
+import { MAX_EPISODE_HOSTS } from "./src/types";
 
 dotenv.config();
 
@@ -19,6 +20,8 @@ type RequestedSpeaker = {
   voiceAccent?: string;
   gender?: "male" | "female" | "neutral";
   style?: string;
+  kokoroVoice?: string;
+  voicePace?: number;
   avatarSeed?: string;
   voiceReferenceId?: string;
   voiceReferenceName?: string;
@@ -127,7 +130,7 @@ type PlayablePresetPodcast = {
   audioScript: string;
 };
 
-const FALLBACK_SPEAKERS: Required<RequestedSpeaker>[] = [
+const FALLBACK_SPEAKERS: Required<Omit<RequestedSpeaker, "kokoroVoice" | "voicePace">>[] = [
   {
     id: "maya",
     name: "Maya Chen",
@@ -972,7 +975,7 @@ function titleFromPrompt(topic: string): string {
 
 function normalizeSpeakers(input: RequestedSpeaker[] | undefined, numSpeakers = 2) {
   const requested = Array.isArray(input) && input.length > 0 ? input : FALLBACK_SPEAKERS.slice(0, numSpeakers || 2);
-  return requested.slice(0, 5).map((speaker, index) => {
+  return requested.slice(0, MAX_EPISODE_HOSTS).map((speaker, index) => {
     const fallback = FALLBACK_SPEAKERS[index % FALLBACK_SPEAKERS.length];
     return {
       name: cleanText(speaker.name, fallback.name),
@@ -981,6 +984,8 @@ function normalizeSpeakers(input: RequestedSpeaker[] | undefined, numSpeakers = 
       voiceAccent: cleanText(speaker.voiceAccent, fallback.voiceAccent),
       gender: speaker.gender || fallback.gender,
       style: cleanText(speaker.style, fallback.style),
+      kokoroVoice: getKokoroVoices().find((voice) => voice.id === speaker.kokoroVoice)?.id,
+      voicePace: Number.isFinite(speaker.voicePace) ? clampNumber(speaker.voicePace, 0.9, 1.1) : undefined,
       avatarSeed: cleanText(speaker.avatarSeed, fallback.avatarSeed),
       voiceReferenceId: speaker.voiceReferenceId ? cleanText(speaker.voiceReferenceId, "") : undefined,
       voiceReferenceName: speaker.voiceReferenceName ? cleanText(speaker.voiceReferenceName, "") : undefined,
@@ -1376,7 +1381,13 @@ function getKokoroModel() {
     const { env } = await import("@huggingface/transformers");
     env.cacheDir = path.join(LOCAL_TTS_DIR, "kokoro");
     const { KokoroTTS } = await import("kokoro-js");
-    return KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", { device: "cpu", dtype: "q8" });
+    const model = "onnx-community/Kokoro-82M-v1.0-ONNX";
+    if (process.env.KOKORO_QUALITY === "q8") return KokoroTTS.from_pretrained(model, { device: "cpu", dtype: "q8" });
+    try {
+      return await KokoroTTS.from_pretrained(model, { device: "cpu", dtype: "fp32" });
+    } catch {
+      return KokoroTTS.from_pretrained(model, { device: "cpu", dtype: "q8" });
+    }
   })().catch((error) => {
     kokoroModel = undefined;
     throw error;
@@ -1392,6 +1403,7 @@ async function synthesizeWithKokoro(req: AudioRequest, signal: AbortSignal) {
   if (!segments.length) throw new Error("No script text was provided for Kokoro generation.");
 
   const speakers = Array.isArray(req.speakers) ? req.speakers : [];
+  const cast = new Map(speakers.map((speaker) => [cleanText(speaker?.name, "Host"), speaker]));
   const names = new Set([...speakers.map((speaker) => cleanText(speaker?.name, "Host")), ...segments.map(({ speakerName }) => speakerName)]);
   const assigned = new Map<string, (typeof voices)[number]>();
   const used = new Set<string>();
@@ -1405,8 +1417,9 @@ async function synthesizeWithKokoro(req: AudioRequest, signal: AbortSignal) {
   }
   for (const name of names) {
     if (assigned.has(name)) continue;
-    const gender = speakers.find((speaker) => cleanText(speaker?.name, "Host") === name)?.gender;
-    const voice = voices.find((item) => item.gender === gender && !used.has(item.id))
+    const profile = cast.get(name);
+    const voice = voices.find((item) => item.id === profile?.kokoroVoice && !used.has(item.id))
+      || voices.find((item) => item.gender === profile?.gender && !used.has(item.id))
       || voices.find((item) => !used.has(item.id))
       || voices[assigned.size % voices.length];
     assigned.set(name, voice);
@@ -1419,17 +1432,18 @@ async function synthesizeWithKokoro(req: AudioRequest, signal: AbortSignal) {
   for (const [index, segment] of segments.entries()) {
     signal.throwIfAborted();
     const voice = assigned.get(segment.speakerName) || voices[0];
-    const { audio, sampling_rate } = await tts.generate(segment.text, { voice: voice.id });
+    const pace = cast.get(segment.speakerName)?.voicePace;
+    const { audio, sampling_rate } = await tts.generate(segment.text, { voice: voice.id, speed: Number.isFinite(pace) ? clampNumber(pace, 0.9, 1.1) : 0.97 });
     if (!audio.length || sampling_rate !== format.sampleRate) throw new Error("Kokoro returned audio in an unexpected format.");
     const pcm = Buffer.allocUnsafe(audio.length * format.blockAlign);
     for (let index = 0; index < audio.length; index += 1) {
       pcm.writeInt16LE(Math.round(clampNumber(audio[index], -1, 1) * 32767), index * format.blockAlign);
     }
     parts.push(pcm);
-    if (index < segments.length - 1) parts.push(makeSilence(format, 120));
+    if (index < segments.length - 1) parts.push(makeSilence(format, segments[index + 1].speakerName === segment.speakerName ? 90 : 190));
   }
-  const cast = [...new Set(segments.map(({ speakerName }) => assigned.get(speakerName)?.label.split(" · ")[0]))].filter(Boolean);
-  return { audio: buildWav(format, Buffer.concat(parts)).toString("base64"), voice: { id: "kokoro-cast", name: `Kokoro: ${cast.join(", ")}` } };
+  const namesUsed = [...new Set(segments.map(({ speakerName }) => assigned.get(speakerName)?.label.split(" · ")[0]))].filter(Boolean);
+  return { audio: buildWav(format, Buffer.concat(parts)).toString("base64"), voice: { id: "kokoro-cast", name: `Kokoro: ${namesUsed.join(", ")}` } };
 }
 
 function findChatterboxReferenceForSpeaker(

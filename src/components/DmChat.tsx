@@ -5,13 +5,13 @@ export function DmChat({ isOpen, onClose }: { isOpen: boolean, onClose: () => vo
   if (!isOpen) return null;
 
   return (
-    <div className="fixed top-0 bottom-0 right-4 my-auto w-[500px] h-[500px] rounded-2xl bg-[#0c0d21]/95 backdrop-blur-3xl z-50 shadow-[-20px_0_40px_rgba(0,0,0,0.5)] border border-white/10 flex flex-col overflow-hidden">
+    <div role="region" aria-label="Direct messages" className="dm-panel fixed right-[4.25rem] top-1/2 z-[55] flex -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#171322] shadow-2xl">
       <div className="flex items-center justify-between p-4 border-b border-white/10 bg-[#101223]">
         <h2 className="text-sm font-bold font-display flex items-center gap-2 text-white tracking-widest">
           <MessageSquare className="w-5 h-5 text-brand-400" /> 
           DIRECT MESSAGES
         </h2>
-        <button onClick={onClose} className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white">
+        <button onClick={onClose} aria-label="Close direct messages" className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white">
           <X className="w-4 h-4" />
         </button>
       </div>

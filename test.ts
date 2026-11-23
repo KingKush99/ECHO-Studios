@@ -4,6 +4,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { encodeWavToMp3 } from "./src/mp3-export";
+import { exportPodcastFeed } from "./src/publish-feed";
+import { HOSTER_PROFILES } from "./src/presets";
 
 test("podcast and local voice generation API", async (t) => {
   const initialDirectory = process.cwd();
@@ -81,7 +84,7 @@ test("podcast and local voice generation API", async (t) => {
     return new Response(null, { status: 503 });
   });
 
-  async function generateEpisode(durationSeconds = 60) {
+  async function generateEpisode(durationSeconds = 60, extra = {}) {
     calls.length = 0;
     const response = await request(`http://127.0.0.1:${port}/api/generate-podcast`, {
       method: "POST",
@@ -92,6 +95,7 @@ test("podcast and local voice generation API", async (t) => {
         language: "French",
         speakers: [{ name: "Camille" }, { name: "Samir" }],
         promptImages: [{ name: "harbour.jpg", notes: "A pier at low tide" }],
+        ...extra,
       }),
     });
     assert.equal(response.status, 200);
@@ -105,6 +109,21 @@ test("podcast and local voice generation API", async (t) => {
     assert.match(episode.tagline, /Written with the built-in templates/);
     const last = episode.script.at(-1);
     assert.equal(last.estimatedStartSeconds + last.durationSeconds, 60);
+  });
+
+  await t.test("retains six hosts and creates a usable RSS enclosure", async () => {
+    delete process.env.OLLAMA_MODEL;
+    const speakers = HOSTER_PROFILES.slice(6);
+    const episode = await generateEpisode(120, { speakers });
+    assert.equal(episode.speakers.length, 6);
+    assert.deepEqual(episode.speakers.map(({ kokoroVoice }) => kokoroVoice), speakers.map(({ kokoroVoice }) => kokoroVoice));
+    const metadata = { author: "Echo & Friends", email: "test@example.com", website: "https://example.com", audio: "https://example.com/episode.mp3?v=1&x=2", artwork: "https://example.com/art.png", bytes: 48128, category: "Technology", explicit: false };
+    const rss = exportPodcastFeed(episode, metadata);
+    assert.match(rss, /length="48128" type="audio\/mpeg"/);
+    assert.match(rss, /Echo &amp; Friends/);
+    assert.match(rss, /episode\.mp3\?v=1&amp;x=2/);
+    assert.equal(exportPodcastFeed(episode, { ...metadata, bytes: 0 }), "");
+    assert.equal(exportPodcastFeed(episode, { ...metadata, audio: "https://127.0.0.1/audio.mp3" }), "");
   });
 
   await t.test("writes model sections with cast, research, and continuous chapter timing", async () => {
@@ -182,7 +201,11 @@ test("podcast and local voice generation API", async (t) => {
     const file = await request(`http://127.0.0.1:${port}${audio.audioUrl}`);
     assert.equal(file.status, 200);
     assert.equal(file.headers.get("content-type"), "audio/wav");
-    assert.equal(Buffer.from(await file.arrayBuffer()).toString("ascii", 0, 4), "RIFF");
+    const wav = await file.arrayBuffer();
+    assert.equal(Buffer.from(wav).toString("ascii", 0, 4), "RIFF");
+    const mp3 = encodeWavToMp3(wav);
+    assert.ok(mp3.blocks.length > 0);
+    assert.equal(new Uint8Array(mp3.blocks[0])[0], 255);
     assert.equal(hostedVoiceCalls, 0);
   });
 

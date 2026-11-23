@@ -16,6 +16,8 @@ import { PlaybackBar } from "./components/PlaybackBar";
 import { SearchView } from "./components/SearchView";
 import { DmChat } from "./components/DmChat";
 import { AiOracleChat } from "./components/AiOracleChat";
+import { SettingsModal } from "./components/SettingsModal";
+import { loadStudioSettings, STUDIO_SETTINGS_KEY, type StudioSettings } from "./studio-settings";
 import echoLogoUrl from "./assets/images/echo_studios_favicon_1782358750086.jpg";
 
 type ActiveTab = "create" | "listen" | "publish" | "profile" | "search";
@@ -27,6 +29,8 @@ type PlaybackChunk = {
   nextLineIndex: number;
   provider: LocalAudioProvider;
 };
+type PreparedChunk = { url: string; chunk: PlaybackChunk };
+type QueuedChunk = { start: number; provider: LocalAudioProvider; controller: AbortController; result: Promise<PreparedChunk | null>; url?: string };
 const PODCAST_LIBRARY_STORAGE_KEY = "echo.podcastLibrary.v1";
 
 function preferredAudioProvider(engine: AudioEngineStatus | null, episode: PodcastMetadata | null): AudioProvider {
@@ -64,6 +68,10 @@ export default function App() {
   const [podcastLibrary, setPodcastLibrary] = useState<PodcastMetadata[]>(loadStoredPodcastLibrary);
   const [isDmOpen, setIsDmOpen] = useState(false);
   const [isAiChatOpen, setIsAiChatOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState(loadStudioSettings);
+  const [hasOpenedLive, setHasOpenedLive] = useState(false);
+  const [hasOpenedPublish, setHasOpenedPublish] = useState(false);
   const [isPodcastPlayerOpen, setIsPodcastPlayerOpen] = useState(false);
   const [isPlaybackBarOpen, setIsPlaybackBarOpen] = useState(false);
   const [liveEpisode, setLiveEpisode] = useState<LivePodcast | null>(null);
@@ -78,7 +86,7 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [playbackRate, setPlaybackRate] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState(settings.defaultSpeed);
   const [audioEngine, setAudioEngine] = useState<AudioEngineStatus | null>(null);
   const [audioProvider, setAudioProvider] = useState<AudioProvider>("browser");
   const [hostVoices, setHostVoices] = useState<Record<string, string>>({});
@@ -92,11 +100,13 @@ export default function App() {
   const neuralAudioRef = useRef<HTMLAudioElement | null>(null);
   const liveAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioRequestRef = useRef<AbortController | null>(null);
+  const nextChunkRef = useRef<QueuedChunk | null>(null);
   const autoPlayNeuralAudioRef = useRef(false);
+  const chunkSeekTimeRef = useRef<number | null>(null);
   const isGeneratingNeuralAudioRef = useRef(false);
   const playbackChunkRef = useRef<PlaybackChunk | null>(null);
   const continueChunkPlaybackRef = useRef(false);
-  const playbackRateRef = useRef(1);
+  const playbackRateRef = useRef(settings.defaultSpeed);
   const speechStatusRef = useRef<SpeechStatus>("idle");
   const currentTimeRef = useRef(0);
   const durationRef = useRef(0);
@@ -173,16 +183,10 @@ export default function App() {
 
   useEffect(() => {
     playbackRateRef.current = playbackRate;
-    if (neuralAudioRef.current) {
-      neuralAudioRef.current.playbackRate = playbackRate;
+    for (const audio of [neuralAudioRef.current, liveAudioRef.current]) {
+      if (audio) { audio.playbackRate = playbackRate; audio.volume = settings.volume / 100; }
     }
-    if (liveAudioRef.current) liveAudioRef.current.playbackRate = playbackRate;
-  }, [playbackRate, neuralAudioUrl, liveEpisode]);
-
-  useEffect(() => {
-    if (!neuralAudioUrl) return;
-    neuralAudioRef.current?.load();
-  }, [neuralAudioUrl]);
+  }, [playbackRate, settings.volume, neuralAudioUrl, liveEpisode]);
 
   useEffect(() => {
     if (!neuralAudioUrl || !autoPlayNeuralAudioRef.current) return;
@@ -190,9 +194,11 @@ export default function App() {
     const audio = neuralAudioRef.current;
     if (!audio) return;
 
-    autoPlayNeuralAudioRef.current = false;
     const playAudio = () => {
+      autoPlayNeuralAudioRef.current = false;
+      if (!continueChunkPlaybackRef.current && playbackChunkRef.current) return;
       void audio.play().catch(() => {
+        setPlaybackStatus("paused");
         setSpeechError("HD audio is ready. Press Play to start it.");
       });
     };
@@ -239,11 +245,13 @@ export default function App() {
   }
 
   function revokeNeuralAudio() {
+    discardQueuedChunk();
     audioRequestRef.current?.abort();
     audioRequestRef.current = null;
     isGeneratingNeuralAudioRef.current = false;
     setIsGeneratingNeuralAudio(false);
     autoPlayNeuralAudioRef.current = false;
+    chunkSeekTimeRef.current = null;
     if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
     setNeuralAudioUrl(null);
     setNeuralAudioError(null);
@@ -366,6 +374,7 @@ export default function App() {
 
     const line = data.script[index];
     const utterance = new SpeechSynthesisUtterance(prepareDialogueForSpeech(line.dialogue));
+    utterance.volume = settings.volume / 100;
     utterance.lang = getSpeechLocale(data.language);
     const voice = chooseVoice(line.speakerName);
     const speechSettings = getSpeechSettings(line.speakerName, index);
@@ -467,6 +476,7 @@ export default function App() {
     revokeNeuralAudio();
     podcastDataRef.current = data;
     setPodcastData(data);
+    setPlaybackRate(settings.defaultSpeed);
     setAudioProvider(preferredAudioProvider(audioEngine, data));
     setHostVoices({});
     const clonedReference = data.voiceReferences?.find((reference) => reference.clonedVoiceId);
@@ -522,6 +532,8 @@ export default function App() {
   }
 
   function navigate(tab: ActiveTab) {
+    if (tab === "listen") setHasOpenedLive(true);
+    if (tab === "publish") setHasOpenedPublish(true);
     setIsPodcastPlayerOpen(false);
     setActiveTab(tab);
     window.scrollTo(0, 0);
@@ -534,11 +546,12 @@ export default function App() {
 
   function playLiveEpisode(episode: LivePodcast, section: "listen" | "search" = "listen") {
     setLiveSection(section);
-    if (liveEpisode?.id === episode.id && liveAudioRef.current) {
+    if (liveEpisode?.audioUrl === episode.audioUrl && liveAudioRef.current) {
       void liveAudioRef.current.play().catch(() => {});
       return;
     }
     closePlayback();
+    setPlaybackRate(settings.defaultSpeed);
     setLiveTime(0);
     setLiveDuration(0);
     setLivePlaying(false);
@@ -573,6 +586,11 @@ export default function App() {
     else setSelectedNeuralVoice(voice);
   }
 
+  function updateSettings(next: StudioSettings) {
+    setSettings(next);
+    try { window.localStorage.setItem(STUDIO_SETTINGS_KEY, JSON.stringify(next)); } catch { /* Storage is optional. */ }
+  }
+
   function changeHostVoice(speaker: string, voice: string) {
     cancelSpeech(false);
     revokeNeuralAudio();
@@ -586,6 +604,26 @@ export default function App() {
     if (audioProvider === "elevenlabs") return audioEngine.elevenLabsAvailable;
     if (audioProvider === "chatterbox") return audioEngine.chatterboxAvailable;
     return audioEngine.piperAvailable;
+  }
+
+  async function renderPublishingAudio(episode: PodcastMetadata, signal: AbortSignal) {
+    const provider = audioProvider === "browser" || audioProvider === "elevenlabs" ? preferredAudioProvider(audioEngine, episode) : audioProvider;
+    if (provider === "browser" || provider === "elevenlabs") throw new Error("Select an available local voice engine in the episode’s Audio settings to export audio.");
+    const response = await fetch("/api/generate-audio", {
+      method: "POST", signal, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        script: episode.script, speakers: episode.speakers, language: episode.language, provider,
+        maxSeconds: Math.ceil(getPodcastDuration(episode)),
+        voiceId: provider === "piper" ? selectedNeuralVoice : undefined,
+        voiceOverrides: provider === "kokoro" ? hostVoices : undefined,
+        voiceReferences: provider === "chatterbox" ? episode.voiceReferences : undefined,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.audioUrl) throw new Error(result.error || "The audio export failed.");
+    const file = await fetch(result.audioUrl, { signal });
+    if (!file.ok) throw new Error("The generated audio could not be downloaded.");
+    return file.blob();
   }
 
   function changePlaybackRate(value: number) {
@@ -690,6 +728,7 @@ export default function App() {
         if (neuralAudioUrl.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
         setNeuralAudioUrl(null);
         playbackChunkRef.current = null;
+        discardQueuedChunk();
         setPlaybackTime(targetTime);
         setActiveLine(targetIndex);
         if (wasPlaying) {
@@ -722,72 +761,104 @@ export default function App() {
     }
   }
 
-  async function generateLocalPlaybackChunk(startLineIndex: number, provider: LocalAudioProvider) {
-    const data = podcastDataRef.current;
-    const available = provider === "kokoro" ? audioEngine?.kokoroAvailable : provider === "chatterbox" ? audioEngine?.chatterboxAvailable : audioEngine?.piperAvailable;
-    if (!data || !available || isGeneratingNeuralAudioRef.current) return;
+  function discardQueuedChunk() {
+    const queued = nextChunkRef.current;
+    nextChunkRef.current = null;
+    queued?.controller.abort();
+    if (queued?.url) URL.revokeObjectURL(queued.url);
+  }
 
-    const boundedStartIndex = Math.max(0, Math.min(startLineIndex, data.script.length - 1));
-    let nextLineIndex = boundedStartIndex;
+  async function prepareLocalChunk(data: PodcastMetadata, start: number, provider: LocalAudioProvider, signal: AbortSignal): Promise<PreparedChunk> {
+    let nextLineIndex = start;
     let coveredSeconds = 0;
-    const targetChunkSeconds = 35;
-
     while (nextLineIndex < data.script.length) {
-      const lineSeconds = Math.max(1, data.script[nextLineIndex].durationSeconds);
-      if (nextLineIndex > boundedStartIndex && coveredSeconds + lineSeconds > targetChunkSeconds) break;
-      coveredSeconds += lineSeconds;
+      const seconds = Math.max(1, data.script[nextLineIndex].durationSeconds);
+      if (nextLineIndex > start && coveredSeconds + seconds > (start === 0 ? 18 : 34)) break;
+      coveredSeconds += seconds;
       nextLineIndex += 1;
     }
+    const script = data.script.slice(start, nextLineIndex);
+    const first = script[0];
+    const last = script.at(-1);
+    if (!first || !last) throw new Error("There is no dialogue at this point in the episode.");
+    const response = await fetch("/api/generate-audio", {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        script, speakers: data.speakers, language: data.language, provider,
+        maxSeconds: Math.ceil(coveredSeconds),
+        voiceId: provider === "piper" ? selectedNeuralVoice : undefined,
+        voiceOverrides: provider === "kokoro" ? hostVoices : undefined,
+        voiceReferences: provider === "chatterbox" ? data.voiceReferences : undefined,
+      }),
+    });
+    const output = await response.json();
+    if (!response.ok || !output.audioUrl) throw new Error(output.error || "The studio could not render the requested dialogue.");
+    const file = await fetch(output.audioUrl, { signal });
+    if (!file.ok) throw new Error("The rendered audio could not be loaded.");
+    const bytes = await file.blob();
+    signal.throwIfAborted();
+    return {
+      url: URL.createObjectURL(bytes),
+      chunk: { provider, startTime: first.estimatedStartSeconds, endTime: last.estimatedStartSeconds + last.durationSeconds, nextLineIndex },
+    };
+  }
 
-    const chunkScript = data.script.slice(boundedStartIndex, nextLineIndex);
-    if (chunkScript.length === 0) return;
-    const startTime = chunkScript[0].estimatedStartSeconds;
-    const lastLine = chunkScript[chunkScript.length - 1];
-    const endTime = lastLine.estimatedStartSeconds + lastLine.durationSeconds;
+  function queueLocalChunk(data: PodcastMetadata, start: number, provider: LocalAudioProvider) {
+    if (start >= data.script.length) return;
+    const controller = new AbortController();
+    const queue: QueuedChunk = {
+      start, provider, controller,
+      result: prepareLocalChunk(data, start, provider, controller.signal).then((prepared) => {
+        if (controller.signal.aborted) { URL.revokeObjectURL(prepared.url); return null; }
+        queue.url = prepared.url;
+        return prepared;
+      }).catch(() => null),
+    };
+    nextChunkRef.current = queue;
+  }
+
+  async function generateLocalPlaybackChunk(start: number, provider: LocalAudioProvider, sequential = false) {
+    const data = podcastDataRef.current;
+    if (!data || !data.script.length || isGeneratingNeuralAudioRef.current) return;
+    const bounded = Math.max(0, Math.min(start, data.script.length - 1));
+    let queued = nextChunkRef.current;
+    if (queued && (queued.start !== bounded || queued.provider !== provider)) {
+      discardQueuedChunk();
+      queued = null;
+    }
 
     isGeneratingNeuralAudioRef.current = true;
-    const controller = new AbortController();
+    const controller = queued?.controller || new AbortController();
     audioRequestRef.current = controller;
-    setIsGeneratingNeuralAudio(true);
+    const showLoading = !sequential || !queued?.url;
+    if (showLoading) setIsGeneratingNeuralAudio(true);
     setNeuralAudioError(null);
     setSpeechError(null);
-    cancelSpeech(false);
+    if (!sequential) cancelSpeech(false);
 
     try {
-      const response = await fetch("/api/generate-audio", {
-        method: "POST",
-        signal: controller.signal,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          script: chunkScript,
-          speakers: data.speakers,
-          language: data.language,
-          maxSeconds: Math.ceil(coveredSeconds),
-          provider,
-          voiceId: provider === "piper" ? selectedNeuralVoice : undefined,
-          voiceOverrides: provider === "kokoro" ? hostVoices : undefined,
-          voiceReferences: provider === "chatterbox" ? data.voiceReferences : undefined,
-        }),
-      });
-      const result = await response.json();
-      if (controller.signal.aborted) return;
-      if (!response.ok) throw new Error(result.error || "Fast playback audio failed.");
-
+      const prepared = (queued && await queued.result) || await prepareLocalChunk(data, bounded, provider, controller.signal);
+      if (controller.signal.aborted) { URL.revokeObjectURL(prepared.url); return; }
       if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
-      const nextAudioUrl = result.audioUrl || (() => {
-        const buffer = Uint8Array.from(atob(result.audio), (char) => char.charCodeAt(0));
-        return URL.createObjectURL(new Blob([buffer], { type: result.mimeType || "audio/wav" }));
-      })();
-      playbackChunkRef.current = { startTime, endTime, nextLineIndex, provider };
+      nextChunkRef.current = null;
+      playbackChunkRef.current = prepared.chunk;
       autoPlayNeuralAudioRef.current = continueChunkPlaybackRef.current;
-      setNeuralAudioUrl(nextAudioUrl);
-      setPlaybackTime(startTime);
-      setActiveLine(boundedStartIndex);
-      setPlaybackStatus("idle");
+      const resume = sequential ? prepared.chunk.startTime : Math.max(prepared.chunk.startTime, Math.min(currentTimeRef.current, prepared.chunk.endTime));
+      chunkSeekTimeRef.current = resume;
+      setPlaybackTime(resume);
+      setNeuralAudioUrl(prepared.url);
+      queueLocalChunk(data, prepared.chunk.nextLineIndex, provider);
     } catch (error: any) {
       if (controller.signal.aborted) return;
+      discardQueuedChunk();
       continueChunkPlaybackRef.current = false;
-      setNeuralAudioError(error.message || "Fast playback audio is not available.");
+      if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
+      setNeuralAudioUrl(null);
+      playbackChunkRef.current = null;
+      setPlaybackStatus("paused");
+      setNeuralAudioError(error.message || "Audio generation failed.");
       setSpeechError("Audio could not be prepared. Open the episode to change voices or retry.");
     } finally {
       if (audioRequestRef.current === controller) {
@@ -808,17 +879,17 @@ export default function App() {
     const shouldContinue = continueChunkPlaybackRef.current;
     const data = podcastDataRef.current;
     setPlaybackTime(playbackChunk.endTime);
-    setPlaybackStatus("idle");
 
     if (data && playbackChunk.nextLineIndex < data.script.length) {
       setActiveLine(playbackChunk.nextLineIndex);
       if (shouldContinue) {
-        void generateLocalPlaybackChunk(playbackChunk.nextLineIndex, playbackChunk.provider);
+        void generateLocalPlaybackChunk(playbackChunk.nextLineIndex, playbackChunk.provider, true);
         return;
       }
     }
 
     if (neuralAudioUrl?.startsWith("blob:")) URL.revokeObjectURL(neuralAudioUrl);
+    setPlaybackStatus("idle");
     setNeuralAudioUrl(null);
     playbackChunkRef.current = null;
   }
@@ -828,6 +899,7 @@ export default function App() {
     if (!data || isGeneratingNeuralAudioRef.current) return;
 
     isGeneratingNeuralAudioRef.current = true;
+    discardQueuedChunk();
     const controller = new AbortController();
     audioRequestRef.current = controller;
     playbackChunkRef.current = null;
@@ -881,14 +953,11 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell min-h-screen bg-[#100e18] font-sans text-white" data-playing-bar={isPlaybackBarOpen}>
+    <div className="app-shell min-h-screen bg-[#100e18] font-sans text-white" data-playing-bar={isPlaybackBarOpen} data-reduced-motion={settings.reducedMotion}>
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#100e18]/95 backdrop-blur-sm">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:px-6">
           <button onClick={() => navigate("create")} className="flex items-center gap-2 font-display text-lg font-bold tracking-tight" aria-label="Echo Studios home">
             <img src={echoLogoUrl} alt="" className="size-8 rounded-full object-cover" /> Echo Studios
-          </button>
-          <button onClick={() => setIsDmOpen((open) => !open)} className="rounded-lg p-2 text-zinc-400 hover:bg-white/10 hover:text-white" aria-label="Open direct messages" aria-expanded={isDmOpen}>
-            <MessageSquare aria-hidden="true" className="size-5" />
           </button>
         </div>
       </header>
@@ -896,20 +965,22 @@ export default function App() {
         <div hidden={activeTab !== "create"}>
           <CreateView onGenerated={handleGenerated} onUpdated={handlePodcastUpdated} generatedPodcast={podcastData} onOpenEpisode={() => podcastData && openEpisode(podcastData)} />
         </div>
-        {activeTab === "listen" && <ListenFeedView onPlayEpisode={playLiveEpisode} initialEpisode={liveEpisode} />}
-        {activeTab === "publish" && <PublishView data={podcastData} />}
-        {activeTab === "profile" && <ProfileView onHome={() => navigate("create")} generatedPodcasts={podcastLibrary} onOpenDraft={openEpisode} />}
+        {hasOpenedLive && <div hidden={activeTab !== "listen"}><ListenFeedView onPlayEpisode={playLiveEpisode} initialEpisode={liveEpisode} episodes={podcastLibrary} onOpenEpisode={openEpisode} /></div>}
+        {hasOpenedPublish && <div hidden={activeTab !== "publish"}><PublishView data={podcastData} onRenderAudio={renderPublishingAudio} /></div>}
+        {activeTab === "profile" && <ProfileView onHome={() => navigate("create")} generatedPodcasts={podcastLibrary} onOpenDraft={openEpisode} onOpenSettings={() => setIsSettingsOpen(true)} />}
         {activeTab === "search" && <SearchView onPlayEpisode={(episode) => playLiveEpisode(episode, "search")} playingId={liveEpisode?.id} />}
       </main>
 
       <DmChat isOpen={isDmOpen} onClose={() => setIsDmOpen(false)} />
+      <button onClick={() => setIsDmOpen((open) => !open)} className="fixed right-4 top-1/2 z-[54] grid size-11 -translate-y-1/2 place-items-center rounded-full border border-white/15 bg-[#211c31] text-brand-300 shadow-lg hover:bg-[#302744]" aria-label="Open direct messages" aria-expanded={isDmOpen}><MessageSquare aria-hidden="true" className="size-5" /></button>
+      {isSettingsOpen && <SettingsModal settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} />}
       <button onClick={() => setIsAiChatOpen((open) => !open)} className="fixed bottom-[calc(var(--app-dock-height)+0.75rem)] right-4 z-[55] grid size-11 place-items-center rounded-full bg-brand-600 text-white shadow-lg hover:bg-brand-500" aria-label={isAiChatOpen ? "Close AI assistant" : "Open AI assistant"} aria-expanded={isAiChatOpen}>
         <Bot aria-hidden="true" className="size-5" />
       </button>
       <AiOracleChat isOpen={isAiChatOpen} onClose={() => setIsAiChatOpen(false)} />
 
       {liveEpisode && (
-        <audio key={liveEpisode.id} ref={liveAudioRef} src={liveEpisode.audioUrl} autoPlay preload="metadata"
+        <audio key={liveEpisode.audioUrl} ref={liveAudioRef} src={liveEpisode.audioUrl} autoPlay preload="metadata"
           onPlay={() => { setLivePlaying(true); setLiveError(null); }}
           onPause={() => setLivePlaying(false)}
           onEnded={() => setLivePlaying(false)}
@@ -926,7 +997,7 @@ export default function App() {
           preload="auto"
           playsInline
           onPlay={() => setPlaybackStatus("playing")}
-          onPause={() => setPlaybackStatus("paused")}
+          onPause={(event) => { if (!event.currentTarget.ended && !autoPlayNeuralAudioRef.current) setPlaybackStatus("paused"); }}
           onError={(event) => {
             const mediaError = event.currentTarget.error;
             setSpeechError(mediaError?.message || "The generated audio could not be loaded.");
@@ -942,6 +1013,12 @@ export default function App() {
           }}
           onLoadedMetadata={(event) => {
             event.currentTarget.playbackRate = playbackRateRef.current;
+            const chunk = playbackChunkRef.current;
+            const seek = chunkSeekTimeRef.current;
+            if (chunk && seek !== null && chunk.endTime > chunk.startTime && Number.isFinite(event.currentTarget.duration)) {
+              event.currentTarget.currentTime = (seek - chunk.startTime) / (chunk.endTime - chunk.startTime) * event.currentTarget.duration;
+            }
+            chunkSeekTimeRef.current = null;
             const episodeDuration = getPodcastDuration(podcastDataRef.current);
             durationRef.current = episodeDuration;
             setDuration(episodeDuration);
@@ -957,12 +1034,19 @@ export default function App() {
         provider={audioProvider}
         voiceId={audioProvider === "elevenlabs" ? selectedElevenVoice : selectedNeuralVoice}
         voiceOverrides={hostVoices}
+        volume={settings.volume}
         loading={isGeneratingNeuralAudio}
         error={neuralAudioError}
         onProviderChange={changeAudioProvider}
         onVoiceChange={changeVoice}
         onHostVoiceChange={changeHostVoice}
         onGenerateAudio={() => void generateNeuralPreview()}
+        onAudition={() => {
+          continueChunkPlaybackRef.current = false;
+          autoPlayNeuralAudioRef.current = false;
+          if (neuralAudioRef.current) neuralAudioRef.current.pause();
+          else if (speechStatusRef.current === "playing") cancelSpeech(false);
+        }}
         onClose={() => setIsPodcastPlayerOpen(false)}
       />}
 

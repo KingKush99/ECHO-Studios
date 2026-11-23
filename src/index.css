@@ -17,11 +17,21 @@
 
 .app-shell { --app-dock-height: calc(65px + env(safe-area-inset-bottom)); }
 .app-shell[data-playing-bar="true"] { --app-dock-height: calc(142px + env(safe-area-inset-bottom)); }
+.app-shell[data-reduced-motion="true"] *, .app-shell[data-reduced-motion="true"] *::before, .app-shell[data-reduced-motion="true"] *::after {
+  animation-duration: 1ms !important;
+  transition-duration: 1ms !important;
+  scroll-behavior: auto !important;
+}
 
 .assistant-panel {
   bottom: calc(var(--app-dock-height) + 4.25rem);
   width: min(24rem, calc(100vw - 2rem));
   height: min(27rem, calc(100dvh - var(--app-dock-height) - 5rem));
+}
+
+.dm-panel {
+  width: min(30rem, calc(100vw - 5rem));
+  height: min(28rem, calc(100dvh - var(--app-dock-height) - 3rem));
 }
 
 @layer base {

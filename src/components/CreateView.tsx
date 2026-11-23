@@ -1,6 +1,7 @@
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Mic2, Settings2, Sparkles, UploadCloud, Wand2, X } from "lucide-react";
 import { PRESET_TOPICS, HOSTER_PROFILES, AUDIO_MOODS, LANGUAGES } from "../presets";
+import { MAX_EPISODE_HOSTS } from "../types";
 import { type PodcastCover, type PodcastMetadata, type PresetTopic, type PromptImage, type VoiceReference } from "../types";
 
 type CoverStyle = "signal" | "midnight" | "solar" | "editorial";
@@ -759,14 +760,6 @@ export function CreateView({
     }
   };
 
-  const toggleHost = (id: string) => {
-    if (selectedHosts.includes(id)) {
-      setSelectedHosts((prev) => prev.filter((hostId) => hostId !== id));
-    } else {
-      setSelectedHosts((prev) => [...prev, id]);
-    }
-  };
-
   const getBackgroundColorForSpeaker = (name: string) => {
     const colors = [
       "bg-blue-500/10 border-blue-500/20 text-blue-200",
@@ -1022,49 +1015,36 @@ export function CreateView({
             </div>
           </details>
 
-          <div className="space-y-3">
-            <label className="text-xs font-semibold tracking-wide text-brand-200 uppercase flex items-center gap-2">
-              <Mic2 className="w-3 h-3" /> Select Cast
-            </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {HOSTER_PROFILES.map((host) => {
-                const isSelected = selectedHosts.includes(host.id);
-                const assignedVoiceId = voiceAssignments[host.id] || "";
-                return (
-                  <div
-                    key={host.id}
-                    className={`flex items-start text-left rounded-xl border transition-colors ${
-                      isSelected ? "border-brand-400/40 bg-brand-500/10" : "border-white/10 hover:border-white/25"
-                    }`}
-                  >
-                    <div className="w-full">
-                      <button onClick={() => toggleHost(host.id)} aria-pressed={isSelected} className="min-h-11 w-full px-3 py-2 text-left">
-                        <div className="flex items-center gap-2">
-                          <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${isSelected ? "bg-brand-400" : "bg-white/20"}`} />
-                          <span className="font-medium text-sm text-white">{host.name}</span>
-                        </div>
-                      </button>
-                      {isSelected && voiceReferences.length > 0 && (
-                        <select
-                          value={assignedVoiceId}
-                          onChange={(event) => setVoiceAssignments((current) => ({ ...current, [host.id]: event.target.value }))}
-                          className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-xs text-white outline-none focus:border-brand-500/50"
-                          aria-label={`Voice for ${host.name}`}
-                        >
-                          <option value="">Default cast voice</option>
-                          {voiceReferences.map((voice) => (
-                            <option key={voice.id} value={voice.id}>
-                              {voice.name} ({voice.sourceType === "third-party" ? "third-party" : voice.sourceType === "downloaded" ? "downloaded" : "clone"})
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+          <section aria-label="Cast" className="space-y-2 border-t border-white/10 pt-4">
+            <div className="flex items-baseline justify-between gap-2">
+              <h2 className="text-sm font-semibold text-white">Cast</h2>
+              <span className="text-xs tabular-nums text-zinc-400">{selectedHosts.length}/{MAX_EPISODE_HOSTS}</span>
             </div>
-          </div>
+            <ul className="divide-y divide-white/10">
+              {HOSTER_PROFILES.filter((host) => selectedHosts.includes(host.id)).map((host) => (
+                <li key={host.id} className="flex flex-wrap items-center gap-2 py-2">
+                  <div className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-white">{host.name}</span>
+                    <span className="text-xs text-zinc-400">{host.role}</span>
+                  </div>
+                  {voiceReferences.length > 0 && (
+                    <select value={voiceAssignments[host.id] || ""} onChange={(event) => setVoiceAssignments((current) => ({ ...current, [host.id]: event.target.value }))} className="max-w-36 rounded-lg border border-white/10 bg-[#201a2b] px-2 py-1 text-xs text-white" aria-label={`Voice reference for ${host.name}`}>
+                      <option value="">Default voice</option>
+                      {voiceReferences.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}
+                    </select>
+                  )}
+                  <button onClick={() => setSelectedHosts((current) => current.filter((id) => id !== host.id))} className="grid size-8 place-items-center rounded-md text-zinc-400 hover:bg-white/10 hover:text-white" aria-label={`Remove ${host.name} from cast`}><X className="size-4" /></button>
+                </li>
+              ))}
+            </ul>
+            <select aria-label="Add a host" value="" disabled={selectedHosts.length >= MAX_EPISODE_HOSTS} onChange={(event) => {
+              const id = event.target.value;
+              if (id) setSelectedHosts((current) => current.length < MAX_EPISODE_HOSTS && !current.includes(id) ? [...current, id] : current);
+            }} className="min-h-10 w-full rounded-xl border border-white/15 bg-[#201a2b] px-3 text-sm text-white disabled:text-zinc-500">
+              <option value="" disabled>{selectedHosts.length >= MAX_EPISODE_HOSTS ? "Cast is full" : "Add a host"}</option>
+              {HOSTER_PROFILES.filter((host) => !selectedHosts.includes(host.id)).map((host) => <option key={host.id} value={host.id}>{host.name} · {host.role}</option>)}
+            </select>
+          </section>
 
           <div className="space-y-3 border-t border-white/10 pt-4">
             <div className="space-y-3">

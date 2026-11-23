@@ -1,3 +1,5 @@
+export const MAX_EPISODE_HOSTS = 6;
+
 export interface Speaker {
   name: string;
   role: string;
@@ -6,6 +8,8 @@ export interface Speaker {
   avatarSeed: string;
   gender: "male" | "female" | "neutral";
   style: string;
+  kokoroVoice?: string;
+  voicePace?: number;
   voiceReferenceId?: string;
   voiceReferenceName?: string;
   voiceSourceType?: "cloned" | "downloaded" | "third-party";

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowLeft, ExternalLink, Eye, Loader2, Play, Radio, RefreshCw, Search, Send, Volume2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, ArrowLeft, ExternalLink, Loader2, Play, Radio, RefreshCw, Search, Send, Volume2 } from "lucide-react";
+import type { PodcastMetadata } from "../types";
 
 export type LivePodcast = {
   id: string;
@@ -45,10 +46,14 @@ function normalizeDuration(value: string) {
   return value;
 }
 
-export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisode: (episode: LivePodcast) => void; initialEpisode: LivePodcast | null }) {
+export function ListenFeedView({ onPlayEpisode, initialEpisode, episodes, onOpenEpisode }: {
+  onPlayEpisode: (episode: LivePodcast) => void;
+  initialEpisode: LivePodcast | null;
+  episodes: PodcastMetadata[];
+  onOpenEpisode: (episode: PodcastMetadata) => void;
+}) {
   const [podcasts, setPodcasts] = useState<LivePodcast[]>([]);
-  const [selectedId, setSelectedId] = useState(initialEpisode?.id || "");
-  const [openedPodcastId, setOpenedPodcastId] = useState(initialEpisode?.id || "");
+  const [openedPodcast, setOpenedPodcast] = useState<LivePodcast | null>(initialEpisode);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
@@ -56,9 +61,8 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
   const [error, setError] = useState<string | null>(null);
   const [chatDraft, setChatDraft] = useState("");
   const [chatMessages, setChatMessages] = useState(DEFAULT_CHAT_MESSAGES);
+  const fetchingFeed = useRef(false);
 
-  const openedPodcast = openedPodcastId ? podcasts.find((podcast) => podcast.id === openedPodcastId)
-    || (initialEpisode?.id === openedPodcastId ? initialEpisode : null) : null;
   const categories = useMemo(() => ["All", ...Array.from(new Set(podcasts.map((podcast) => podcast.category))).filter(Boolean)], [podcasts]);
   const filtered = podcasts.filter((podcast) => {
     const query = searchQuery.trim().toLowerCase();
@@ -72,6 +76,8 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
   });
 
   const loadPodcasts = async (refresh = false) => {
+    if (fetchingFeed.current) return;
+    fetchingFeed.current = true;
     if (refresh) setIsRefreshing(true);
     else setIsLoading(true);
     setError(null);
@@ -82,12 +88,10 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
       if (!response.ok) throw new Error(result.error || "Live podcasts are unavailable.");
       const nextPodcasts = Array.isArray(result.podcasts) ? result.podcasts.filter((podcast: LivePodcast) => podcast.audioUrl) : [];
       setPodcasts(nextPodcasts);
-      setSelectedId((current) => (nextPodcasts.some((podcast: LivePodcast) => podcast.id === current) ? current : nextPodcasts[0]?.id || ""));
     } catch (err: any) {
       setError(err.message || "Live podcasts are unavailable.");
-      setPodcasts([]);
-      setSelectedId("");
     } finally {
+      fetchingFeed.current = false;
       setIsLoading(false);
       setIsRefreshing(false);
     }
@@ -98,8 +102,7 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
   }, []);
 
   const selectPodcast = (podcast: LivePodcast) => {
-    setSelectedId(podcast.id);
-    setOpenedPodcastId(podcast.id);
+    setOpenedPodcast(podcast);
     setChatMessages([
       { id: `${podcast.id}-room`, author: "ECHO", text: `Opened ${podcast.showTitle}. You are now in the live chat.`, time: "Now" },
       ...DEFAULT_CHAT_MESSAGES,
@@ -108,7 +111,7 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
   };
 
   const closeRoom = () => {
-    setOpenedPodcastId("");
+    setOpenedPodcast(null);
     setChatDraft("");
   };
 
@@ -169,7 +172,7 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
             </div>
 
             <aside className="flex flex-col lg:border-l lg:border-white/10 lg:pl-5">
-              {!initialEpisode && <button onClick={() => onPlayEpisode(openedPodcast)} className="mb-3 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold hover:bg-brand-500"><Play className="size-4" /> Play episode</button>}
+              {initialEpisode?.audioUrl !== openedPodcast.audioUrl && <button onClick={() => onPlayEpisode(openedPodcast)} className="mb-3 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold hover:bg-brand-500"><Play className="size-4" /> Play episode</button>}
               <div className="mb-4 grid grid-cols-2 gap-2">
                 <a href={openedPodcast.episodeUrl || openedPodcast.homeUrl || openedPodcast.audioUrl} target="_blank" rel="noreferrer" className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs font-bold text-white hover:bg-white/15">
                   Episode <ExternalLink className="ml-1 inline h-3.5 w-3.5" />
@@ -214,6 +217,16 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
         </section>
       ) : (
         <section className="space-y-4">
+          {episodes.length > 0 && <section aria-label="Your episodes" className="border-b border-white/10 pb-4">
+            <h2 className="mb-2 font-display text-lg font-semibold">Your episodes</h2>
+            <ul className="divide-y divide-white/10">
+              {episodes.map((episode, index) => <li key={index}>
+                <button onClick={() => onOpenEpisode(episode)} className="flex w-full items-center gap-3 py-2.5 pr-10 text-left text-sm hover:text-brand-300">
+                  <Play className="size-4 shrink-0 text-brand-300" /><span className="truncate">{episode.title}</span>
+                </button>
+              </li>)}
+            </ul>
+          </section>}
           <div className="flex flex-col xl:flex-row gap-3">
             <div className="relative flex-1">
               <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
@@ -245,59 +258,28 @@ export function ListenFeedView({ onPlayEpisode, initialEpisode }: { onPlayEpisod
           )}
 
           {isLoading ? (
-            <div className="grid grid-cols-2 gap-3 sm:gap-5">
-              {[1, 2, 3, 4].map((item) => (
-                <div key={item} className="aspect-[4/5] animate-pulse rounded-2xl sm:rounded-[28px] bg-white/5" />
-              ))}
-            </div>
+            <p role="status" className="py-4 text-sm text-zinc-400">Loading live podcasts…</p>
           ) : filtered.length === 0 ? (
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-10 text-center text-sm text-gray-400">
-              No live podcast rooms match this filter.
-            </div>
+            <p className="py-4 text-sm text-zinc-400">No live podcasts match this filter.</p>
           ) : (
-            <div className="grid grid-cols-2 gap-3 sm:gap-5">
-              {filtered.map((podcast) => {
-                const isSelected = selectedId === podcast.id;
-                return (
-                  <button
-                    key={podcast.id}
-                    onClick={() => selectPodcast(podcast)}
-                    className={`group relative aspect-[4/5] overflow-hidden rounded-2xl border text-left shadow-2xl transition-all sm:rounded-[28px] ${isSelected ? "border-pink-400/80 ring-2 ring-pink-400/30" : "border-white/10 hover:border-white/30"}`}
-                    aria-label={`Play ${podcast.showTitle}`}
-                  >
-                    {podcast.imageUrl ? (
-                      <img src={podcast.imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
-                    ) : (
-                      <div className="absolute inset-0 bg-gradient-to-br from-brand-600 via-slate-900 to-pink-700" />
-                    )}
-                    <div className="absolute inset-0 bg-gradient-to-b from-black/35 via-black/5 to-black/78" />
-                    <div className="absolute left-3 top-3 flex items-center gap-1 rounded-full bg-black/25 px-2 py-1 text-xs font-bold text-white backdrop-blur sm:left-4 sm:top-4 sm:gap-1.5 sm:px-2.5 sm:text-sm">
-                      <Eye className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-                      {formatListeners(podcast.listeners)}
-                    </div>
-                    <div className="absolute right-3 top-3 max-w-[46%] truncate rounded-full bg-white/15 px-2 py-1 text-[10px] font-bold text-white backdrop-blur sm:right-4 sm:top-4 sm:px-2.5 sm:text-xs">
-                      {podcast.category}
-                    </div>
-                    <div className="absolute bottom-3 left-3 right-3 flex items-end gap-2 sm:bottom-4 sm:left-4 sm:right-4 sm:gap-3">
-                      <div className="relative h-12 w-12 shrink-0 rounded-full border-2 border-pink-400 bg-black/40 p-1 shadow-[0_0_18px_rgba(236,72,153,0.75)] sm:h-16 sm:w-16">
-                        {podcast.imageUrl ? <img src={podcast.imageUrl} alt="" className="h-full w-full rounded-full object-cover" /> : <Radio className="h-full w-full p-2 text-white" />}
-                        <span className="absolute -bottom-2 left-1/2 -translate-x-1/2 rounded-md bg-pink-500 px-1.5 py-0.5 text-[10px] font-black italic text-white shadow-lg sm:px-2 sm:text-[11px]">
-                          LIVE
-                        </span>
-                      </div>
-                      <div className="min-w-0 flex-1 pb-1">
-                        <h3 className="truncate text-sm font-black text-white drop-shadow sm:text-lg">{podcast.showTitle}</h3>
-                        <p className="line-clamp-2 text-[11px] font-medium leading-snug text-white/85 sm:text-sm">{podcast.episodeTitle}</p>
-                        <div className="mt-1 flex items-center gap-1 text-[10px] font-semibold text-white/80 sm:gap-2 sm:text-xs">
-                          <Play className="h-3.5 w-3.5 fill-current" />
-                          {normalizeDuration(podcast.duration)}
-                        </div>
-                      </div>
-                    </div>
+            <ul className="divide-y divide-white/10">
+              {filtered.map((podcast) => (
+                <li key={podcast.id}>
+                  <button onClick={() => selectPodcast(podcast)} aria-label={`Play ${podcast.showTitle}`} aria-current={initialEpisode?.audioUrl === podcast.audioUrl ? "true" : undefined}
+                    className="flex w-full items-center gap-3 rounded-lg py-3 pr-12 text-left hover:text-brand-300 sm:pr-5">
+                    {podcast.imageUrl
+                      ? <img src={podcast.imageUrl} alt="" className="size-12 shrink-0 rounded-lg object-cover" />
+                      : <span className="grid size-12 shrink-0 place-items-center rounded-lg bg-brand-500/15 text-brand-300"><Radio className="size-5" /></span>}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold">{podcast.showTitle}</span>
+                      <span className="block truncate text-xs text-zinc-400">{podcast.episodeTitle}</span>
+                    </span>
+                    <span className="hidden shrink-0 text-xs text-zinc-400 sm:inline">{normalizeDuration(podcast.duration)}</span>
+                    <Play aria-hidden="true" className="size-4 shrink-0 text-brand-300" />
                   </button>
-                );
-              })}
-            </div>
+                </li>
+              ))}
+            </ul>
           )}
         </section>
       )}

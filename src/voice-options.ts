@@ -7,6 +7,10 @@ const englishVoices = [
   { id: "am_fenrir", label: "Fenrir · US", gender: "male" },
   { id: "af_nicole", label: "Nicole · US", gender: "female" },
   { id: "am_puck", label: "Puck · US", gender: "male" },
+  { id: "af_sarah", label: "Sarah · US", gender: "female" },
+  { id: "bm_fable", label: "Fable · UK", gender: "male" },
+  { id: "bf_isabella", label: "Isabella · UK", gender: "female" },
+  { id: "bm_daniel", label: "Daniel · UK", gender: "male" },
 ] as const;
 
 export function getKokoroVoices(language = "English") {

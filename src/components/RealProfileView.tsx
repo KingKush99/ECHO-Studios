@@ -2,7 +2,6 @@ import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useState } from
 import { ArrowLeft, Bookmark, ChevronDown, Clock, Eye, Grid3x3, Mail, MessageSquare, Pencil, Play, Settings, UserCheck, UserPlus, X } from "lucide-react";
 import { PodcastMetadata } from "../types";
 import { EditProfileModal } from "./EditProfileModal";
-import { SettingsModal } from "./SettingsModal";
 
 type DropdownType = "followers" | "following" | "friends";
 type MailboxPanelId = "messages" | "friends" | "visits";
@@ -119,14 +118,14 @@ function buildPosts(generatedPodcasts: PodcastMetadata[]): ProfilePost[] {
   }));
 }
 
-export function ProfileView({ onHome, generatedPodcasts, onOpenDraft }: {
+export function ProfileView({ onHome, generatedPodcasts, onOpenDraft, onOpenSettings }: {
   onHome: () => void;
   generatedPodcasts: PodcastMetadata[];
   onOpenDraft: (podcast: PodcastMetadata) => void;
+  onOpenSettings: () => void;
 }) {
   const [profile, setProfile] = useState<LocalProfile>(loadLocalProfile);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [activeMailboxPanel, setActiveMailboxPanel] = useState<MailboxPanelId>("messages");
   const [activeDropdown, setActiveDropdown] = useState<DropdownType | null>(null);
@@ -181,25 +180,21 @@ export function ProfileView({ onHome, generatedPodcasts, onOpenDraft }: {
 
       <section className="relative mb-7 border-b border-white/10 pb-6 pt-4">
         <div className="absolute right-0 top-4 z-20 flex items-center gap-2">
-          <button
-            onClick={() => setIsInboxOpen((current) => !current)}
-            className="relative rounded-lg p-2 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
-            aria-label="Open profile mailbox"
-          >
-            <Mail className="w-5 h-5" />
-          </button>
+          <div className="relative" onKeyDown={(event) => { if (event.key === "Escape") setIsInboxOpen(false); }}>
+            <button onClick={() => setIsInboxOpen((current) => !current)} className="rounded-lg p-2 text-zinc-300 hover:bg-white/10 hover:text-white" aria-label="Open profile mailbox" aria-expanded={isInboxOpen} aria-controls={isInboxOpen ? "profile-mailbox" : undefined}>
+              <Mail className="size-5" />
+            </button>
+            {isInboxOpen && <MailboxPanel activePanel={activeMailboxPanel} onPanelChange={setActiveMailboxPanel} />}
+          </div>
 
           <button
-            onClick={() => setIsSettingsModalOpen(true)}
+            onClick={() => { setIsInboxOpen(false); onOpenSettings(); }}
             className="rounded-lg p-2 text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
             aria-label="Open profile settings"
           >
             <Settings className="w-5 h-5" />
           </button>
 
-          {isInboxOpen && (
-            <MailboxPanel activePanel={activeMailboxPanel} onPanelChange={setActiveMailboxPanel} />
-          )}
         </div>
         <div className="grid grid-cols-[64px_1fr] items-center gap-4 sm:grid-cols-[96px_1fr] sm:gap-6">
           <button className="relative group text-left" onClick={() => setIsEditModalOpen(true)} aria-label="Edit profile image">
@@ -315,7 +310,6 @@ export function ProfileView({ onHome, generatedPodcasts, onOpenDraft }: {
           onSave={saveProfile}
         />
       )}
-      {isSettingsModalOpen && <SettingsModal onClose={() => setIsSettingsModalOpen(false)} />}
     </div>
   );
 }
@@ -324,8 +318,8 @@ function MailboxPanel({ activePanel, onPanelChange }: { activePanel: MailboxPane
   const activeSection = MAILBOX_SECTIONS.find((section) => section.id === activePanel) || MAILBOX_SECTIONS[0];
 
   return (
-    <div className="absolute right-0 top-12 z-50 w-[min(680px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/10 bg-[#111229] text-left shadow-[0_10px_40px_rgba(0,0,0,0.8)]">
-      <div className="grid grid-cols-3 gap-2 border-b border-white/10 bg-black/20 p-3">
+    <div id="profile-mailbox" className="absolute right-full top-0 z-30 mr-2 w-48 max-w-[calc(100vw-7rem)] overflow-hidden rounded-xl border border-white/15 bg-[#201b2b] text-left shadow-xl">
+      <div className="space-y-0.5 p-1">
         {MAILBOX_SECTIONS.map((section) => {
           const Icon = section.icon === "message" ? MessageSquare : section.icon === "friend" ? UserPlus : Eye;
           const isActive = activePanel === section.id;
@@ -333,27 +327,20 @@ function MailboxPanel({ activePanel, onPanelChange }: { activePanel: MailboxPane
             <button
               key={section.id}
               onClick={() => onPanelChange(section.id)}
-              className={`rounded-xl border p-3 text-left transition-colors ${isActive ? section.tone : "border-white/10 bg-white/[0.03] text-gray-300 hover:bg-white/10"}`}
+              aria-pressed={isActive}
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${isActive ? "bg-white/10 text-white" : "text-zinc-400 hover:text-white"}`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <Icon className="h-4 w-4" />
-                <span className="rounded-full bg-white/15 px-2 py-0.5 text-xs font-black text-white">{section.items.length}</span>
-              </div>
-              <div className="mt-2 text-xs font-bold leading-tight">{section.title}</div>
+              <Icon aria-hidden="true" className="size-3.5 shrink-0" />
+              <span className="flex-1">{section.title}</span>
+              <span className="tabular-nums">{section.items.length}</span>
             </button>
           );
         })}
       </div>
 
-      <div className="p-3">
-        <div className="mb-2 flex items-center justify-between">
-          <h4 className="text-sm font-bold text-white">{activeSection.title}</h4>
-          <span className="text-xs text-gray-500">Real account data</span>
-        </div>
+      <div className="border-t border-white/10 px-2 py-1.5">
         {activeSection.items.length === 0 ? (
-          <div className="rounded-xl border border-white/5 bg-white/[0.03] p-6 text-center text-sm text-gray-400">
-            No real {activeSection.title.toLowerCase()} yet.
-          </div>
+          <p className="px-1 text-xs text-zinc-400">No {activeSection.title.toLowerCase()} yet.</p>
         ) : (
           <div className="grid gap-2">
             {activeSection.items.map((item) => (

@@ -1,5 +1,6 @@
-import { ChevronLeft, ChevronDown, X } from "lucide-react";
-import { type PodcastMetadata, type AudioProvider, type AudioEngineStatus } from "../types";
+import { useEffect, useRef, useState } from "react";
+import { ChevronLeft, ChevronDown, Play, Square, X } from "lucide-react";
+import { type PodcastMetadata, type AudioProvider, type AudioEngineStatus, type Speaker } from "../types";
 import { getKokoroVoices } from "../voice-options";
 
 function formatTime(seconds: number) {
@@ -7,7 +8,7 @@ function formatTime(seconds: number) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-export function PodcastPlayer({ data, currentLineIndex, onSeek, audioEngine, provider, voiceId, voiceOverrides, loading, error, onProviderChange, onVoiceChange, onHostVoiceChange, onGenerateAudio, onClose }: {
+export function PodcastPlayer({ data, currentLineIndex, onSeek, audioEngine, provider, voiceId, voiceOverrides, volume, loading, error, onProviderChange, onVoiceChange, onHostVoiceChange, onGenerateAudio, onAudition, onClose }: {
   data: PodcastMetadata;
   currentLineIndex: number;
   onSeek: (seconds: number) => void;
@@ -15,12 +16,14 @@ export function PodcastPlayer({ data, currentLineIndex, onSeek, audioEngine, pro
   provider: AudioProvider;
   voiceId: string;
   voiceOverrides: Record<string, string>;
+  volume: number;
   loading: boolean;
   error: string | null;
   onProviderChange: (provider: AudioProvider) => void;
   onVoiceChange: (voice: string) => void;
   onHostVoiceChange: (host: string, voice: string) => void;
   onGenerateAudio: () => void;
+  onAudition: () => void;
   onClose: () => void;
 }) {
   const voices = getKokoroVoices(data.language);
@@ -34,6 +37,44 @@ export function PodcastPlayer({ data, currentLineIndex, onSeek, audioEngine, pro
   const singleVoiceOptions = provider === "piper" ? audioEngine?.voices : provider === "elevenlabs" ? audioEngine?.elevenLabsVoices : undefined;
   const selectClass = "min-h-10 w-full rounded-lg border border-white/15 bg-[#201a2b] px-3 text-sm text-white";
   const backClass = "inline-flex h-10 items-center gap-1 rounded-full bg-red-600 px-3 text-sm font-semibold hover:bg-red-500";
+  const [sampleHost, setSampleHost] = useState("");
+  const [sampleError, setSampleError] = useState("");
+  const sampleRequest = useRef<AbortController | null>(null);
+  const sampleAudio = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => () => { sampleRequest.current?.abort(); sampleAudio.current?.pause(); }, []);
+
+  async function previewVoice(speaker: Speaker) {
+    sampleRequest.current?.abort();
+    sampleAudio.current?.pause();
+    sampleAudio.current = null;
+    setSampleError("");
+    if (sampleHost === speaker.name) { setSampleHost(""); return; }
+    onAudition();
+    const request = new AbortController();
+    sampleRequest.current = request;
+    setSampleHost(speaker.name);
+    try {
+      const response = await fetch("/api/generate-audio", {
+        method: "POST", signal: request.signal, headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "kokoro", language: data.language, speakers: data.speakers, voiceOverrides,
+          script: [{ speakerName: speaker.name, dialogue: `I’m ${speaker.name}. In this episode, we’ll ask a question and see where it takes us.`, durationSeconds: 7 }],
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.audioUrl) throw new Error(result.error || "Voice sample unavailable.");
+      request.signal.throwIfAborted();
+      const audio = new Audio(result.audioUrl);
+      audio.volume = volume / 100;
+      audio.onended = () => { if (sampleAudio.current === audio) setSampleHost(""); };
+      sampleAudio.current = audio;
+      await audio.play();
+    } catch (error) {
+      if (request.signal.aborted) return;
+      setSampleHost("");
+      setSampleError(error instanceof Error ? error.message : "Voice sample unavailable.");
+    }
+  }
 
   return (
     <div role="region" aria-label="Episode details" className="fixed inset-x-0 top-0 bottom-[var(--app-dock-height)] z-40 overflow-y-auto bg-[#100e18] text-white">
@@ -66,13 +107,16 @@ export function PodcastPlayer({ data, currentLineIndex, onSeek, audioEngine, pro
               </select>
             </label>
             {provider === "kokoro" && <div className="grid gap-2 sm:grid-cols-2">
-              {data.speakers.map((speaker) => <label key={speaker.name} className="grid gap-1.5 text-sm text-zinc-300">
-                {speaker.name}
-                <select className={selectClass} value={voiceOverrides[speaker.name] || ""} disabled={loading} onChange={(event) => onHostVoiceChange(speaker.name, event.target.value)} aria-label={`Voice for ${speaker.name}`}>
-                  <option value="">Automatic cast voice</option>
-                  {voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}
-                </select>
-              </label>)}
+              {data.speakers.map((speaker) => <div key={speaker.name} className="flex items-end gap-1.5">
+                <label className="grid min-w-0 flex-1 gap-1.5 text-sm text-zinc-300">
+                  {speaker.name}
+                  <select className={selectClass} value={voiceOverrides[speaker.name] || ""} disabled={loading} onChange={(event) => onHostVoiceChange(speaker.name, event.target.value)} aria-label={`Voice for ${speaker.name}`}>
+                    <option value="">{voices.find((voice) => voice.id === speaker.kokoroVoice)?.label || "Automatic"} (default)</option>
+                    {voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}
+                  </select>
+                </label>
+                <button onClick={() => void previewVoice(speaker)} disabled={loading} aria-label={`${sampleHost === speaker.name ? "Stop sample for" : "Preview voice for"} ${speaker.name}`} className="grid size-10 shrink-0 place-items-center rounded-lg border border-white/15 hover:bg-white/10 disabled:opacity-40">{sampleHost === speaker.name ? <Square className="size-3.5" /> : <Play className="size-4" />}</button>
+              </div>)}
             </div>}
             {singleVoiceOptions && singleVoiceOptions.length > 0 && <label className="grid gap-1.5 text-sm text-zinc-300">
               {provider === "piper" ? "Lead host voice" : "Voice"}
@@ -83,6 +127,7 @@ export function PodcastPlayer({ data, currentLineIndex, onSeek, audioEngine, pro
             </label>}
             {provider === "kokoro" && <p className="text-xs text-zinc-400">Runs locally. First use downloads the voice model.</p>}
             {error && <p role="status" className="text-sm text-red-300">{error}</p>}
+            {sampleError && <p role="status" className="text-sm text-red-300">{sampleError}</p>}
             {provider !== "browser" && <button onClick={onGenerateAudio} disabled={!available || loading} className="w-fit rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold hover:bg-brand-500 disabled:opacity-40">{loading ? "Preparing audio…" : "Generate full audio"}</button>}
           </div>
         </details>

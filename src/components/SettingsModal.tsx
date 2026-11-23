@@ -1,142 +1,76 @@
-import { type ReactNode, useState } from "react";
-import { X, Volume2, Moon, Bell, Lock, User, Accessibility, Globe, HardDrive, Cpu, Info } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { RotateCcw, SlidersHorizontal, X } from "lucide-react";
+import { DEFAULT_STUDIO_SETTINGS, loadStudioSettings, STUDIO_SETTINGS_KEY, type StudioSettings } from "../studio-settings";
 
-const SETTINGS_CATEGORIES = [
-  { id: "visual", icon: <Moon className="w-4 h-4" />, name: "Visual" },
-  { id: "audio", icon: <Volume2 className="w-4 h-4" />, name: "Audio" },
-  { id: "notifications", icon: <Bell className="w-4 h-4" />, name: "Notifications" },
-  { id: "privacy", icon: <Lock className="w-4 h-4" />, name: "Privacy" },
-  { id: "account", icon: <User className="w-4 h-4" />, name: "Account" },
-  { id: "accessibility", icon: <Accessibility className="w-4 h-4" />, name: "Accessibility" },
-  { id: "language", icon: <Globe className="w-4 h-4" />, name: "Language" },
-  { id: "storage", icon: <HardDrive className="w-4 h-4" />, name: "Storage" },
-  { id: "advanced", icon: <Cpu className="w-4 h-4" />, name: "Advanced" },
-  { id: "about", icon: <Info className="w-4 h-4" />, name: "About" },
-];
+const groups = [
+  { name: "Playback", rows: [
+    { key: "volume", label: "Volume", help: "Set the volume for generated episodes, live rooms, and voice samples." },
+    { key: "defaultSpeed", label: "Default speed", help: "Choose the playback speed for new episodes. The bottom player can change it for the current episode." },
+  ] },
+  { name: "Display", rows: [
+    { key: "reducedMotion", label: "Reduce motion", help: "Reduce animated transitions and effects across Echo Studios." },
+  ] },
+] as const;
 
-export function SettingsModal({ onClose }: { onClose: () => void }) {
-  const [activeCategory, setActiveCategory] = useState("visual");
-  const [visualData, setVisualData] = useState({ brightness: 80, contrast: 100, animations: true });
-  const [audioData, setAudioData] = useState({ masterVolume: 100, normalize: true, hdAudio: false });
-  const [notificationData, setNotificationData] = useState({ messages: true, friends: true, visits: false });
+export function SettingsModal({ onClose, settings, onChange }: {
+  onClose: () => void;
+  settings?: StudioSettings;
+  onChange?: (settings: StudioSettings) => void;
+}) {
+  const [localSettings, setLocalSettings] = useState(loadStudioSettings);
+  const [active, setActive] = useState(0);
+  const [focused, setFocused] = useState<keyof StudioSettings>("volume");
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const value = settings || localSettings;
+  const group = groups[active];
+  const current = group.rows.find(({ key }) => key === focused) || group.rows[0];
+
+  useEffect(() => {
+    const previous = document.activeElement;
+    closeRef.current?.focus();
+    return () => { if (previous instanceof HTMLElement) previous.focus(); };
+  }, []);
+
+  function save(next: StudioSettings) {
+    if (onChange) onChange(next);
+    else {
+      setLocalSettings(next);
+      try { window.localStorage.setItem(STUDIO_SETTINGS_KEY, JSON.stringify(next)); } catch { /* Storage is optional. */ }
+    }
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 px-3 backdrop-blur-sm sm:p-4 sm:px-4">
-       <div className="grid max-h-[90vh] w-[min(96vw,56rem)] grid-cols-[132px_minmax(0,1fr)] overflow-hidden rounded-2xl border border-white/10 bg-[#0c0d21] shadow-2xl shadow-[0_0_50px_rgba(0,0,0,0.5)] sm:grid-cols-[180px_minmax(0,1fr)] sm:rounded-3xl md:grid-cols-[16rem_minmax(0,1fr)]">
-          {/* Sidebar */}
-          <div className="flex max-h-[90vh] min-h-0 flex-col border-r border-white/10 bg-black/20">
-            <div className="shrink-0 border-b border-white/10 p-4 sm:p-6">
-               <h2 className="font-display text-lg font-medium text-white sm:text-xl">Settings</h2>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar">
-              {SETTINGS_CATEGORIES.map(cat => (
-                <button
-                  key={cat.id}
-                  onClick={() => setActiveCategory(cat.id)}
-                  className={`flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left text-xs font-medium transition-colors sm:gap-3 sm:px-4 sm:text-sm ${activeCategory === cat.id ? 'bg-brand-500/20 text-brand-300' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
-                >
-                  <span className="shrink-0">{cat.icon}</span>
-                  <span className="min-w-0 truncate">{cat.name}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Content Area */}
-          <div className="flex max-h-[90vh] min-h-0 flex-col bg-[#0c0d21]">
-             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 p-4 sm:p-6">
-                <h3 className="min-w-0 truncate text-base font-medium capitalize text-white sm:text-lg">{activeCategory} Settings</h3>
-                <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white">
-                  <X className="w-5 h-5" />
-                </button>
-             </div>
-             
-             <div className="flex-1 overflow-y-auto p-4 custom-scrollbar sm:p-8">
-                {activeCategory === "visual" && (
-                  <div className="space-y-3 max-w-2xl">
-                    <SettingRow title="Brightness" detail="Adjust the interface light level">
-                      <div className="flex w-36 items-center gap-2 sm:w-56 sm:gap-3">
-                        <input type="range" min="0" max="100" value={visualData.brightness} onChange={e => setVisualData({...visualData, brightness: parseInt(e.target.value)})} className="w-full accent-brand-500" />
-                        <span className="w-10 text-right text-xs text-gray-400">{visualData.brightness}%</span>
-                      </div>
-                    </SettingRow>
-                    <SettingRow title="Contrast" detail="Tune separation between panels and text">
-                      <div className="flex w-36 items-center gap-2 sm:w-56 sm:gap-3">
-                        <input type="range" min="50" max="150" value={visualData.contrast} onChange={e => setVisualData({...visualData, contrast: parseInt(e.target.value)})} className="w-full accent-brand-500" />
-                        <span className="w-10 text-right text-xs text-gray-400">{visualData.contrast}%</span>
-                      </div>
-                    </SettingRow>
-                    <SettingRow title="Animations" detail="Enable UI transitions and motion">
-                      <ToggleSwitch checked={visualData.animations} onClick={() => setVisualData({...visualData, animations: !visualData.animations})} />
-                    </SettingRow>
-                  </div>
-                )}
-
-                {activeCategory === "audio" && (
-                  <div className="space-y-3 max-w-2xl">
-                    <SettingRow title="Master Volume" detail="Set playback volume for previews and live rooms">
-                      <div className="flex w-36 items-center gap-2 sm:w-56 sm:gap-3">
-                        <input type="range" min="0" max="100" value={audioData.masterVolume} onChange={e => setAudioData({...audioData, masterVolume: parseInt(e.target.value)})} className="w-full accent-brand-500" />
-                        <span className="w-10 text-right text-xs text-gray-400">{audioData.masterVolume}%</span>
-                      </div>
-                    </SettingRow>
-                    <SettingRow title="Audio Normalization" detail="Auto-adjust volume levels between episodes">
-                      <ToggleSwitch checked={audioData.normalize} onClick={() => setAudioData({...audioData, normalize: !audioData.normalize})} />
-                    </SettingRow>
-                    <SettingRow title="HD Audio Streaming" detail="Use more data for high-fidelity playback">
-                      <ToggleSwitch checked={audioData.hdAudio} onClick={() => setAudioData({...audioData, hdAudio: !audioData.hdAudio})} />
-                    </SettingRow>
-                  </div>
-                )}
-
-                {activeCategory === "notifications" && (
-                  <div className="space-y-3 max-w-2xl">
-                    <SettingRow title="Message Requests" detail="Notify when creators send a first message">
-                      <ToggleSwitch checked={notificationData.messages} onClick={() => setNotificationData({...notificationData, messages: !notificationData.messages})} />
-                    </SettingRow>
-                    <SettingRow title="Friend Requests" detail="Notify when someone asks to connect">
-                      <ToggleSwitch checked={notificationData.friends} onClick={() => setNotificationData({...notificationData, friends: !notificationData.friends})} />
-                    </SettingRow>
-                    <SettingRow title="Profile Visits" detail="Show visit summaries in your mailbox">
-                      <ToggleSwitch checked={notificationData.visits} onClick={() => setNotificationData({...notificationData, visits: !notificationData.visits})} />
-                    </SettingRow>
-                  </div>
-                )}
-
-                {/* Default placeholder for other categories */}
-                {activeCategory !== "visual" && activeCategory !== "audio" && activeCategory !== "notifications" && (
-                   <div className="space-y-3 max-w-2xl">
-                      <SettingRow title={`${activeCategory.charAt(0).toUpperCase() + activeCategory.slice(1)} Controls`} detail="This category is ready for more controls.">
-                        <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-gray-300">Default</span>
-                      </SettingRow>
-                      <SettingRow title="Sync Preference" detail="Keep this setting available across devices">
-                        <ToggleSwitch checked={false} onClick={() => undefined} />
-                      </SettingRow>
-                   </div>
-                )}
-             </div>
-          </div>
-       </div>
-    </div>
-  )
-}
-
-function SettingRow({ title, detail, children }: { title: string; detail: string; children: ReactNode }) {
-  return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl border border-white/5 bg-white/5 p-3 sm:gap-4 sm:p-4">
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-white">{title}</div>
-        <div className="line-clamp-2 text-xs text-gray-500">{detail}</div>
+    <section role="dialog" aria-modal="true" aria-label="Settings" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} className="fixed inset-0 z-[80] overflow-y-auto bg-[#100e18] text-zinc-100">
+      <header className="flex items-center justify-between border-b border-white/10 px-5 py-4 sm:px-10">
+        <h2 className="flex items-center gap-3 font-display text-3xl font-bold tracking-tight"><SlidersHorizontal className="size-5 text-brand-300" /> Settings</h2>
+        <button ref={closeRef} onClick={onClose} aria-label="Close settings" className="rounded-lg p-2 hover:bg-white/10"><X className="size-5" /></button>
+      </header>
+      <nav aria-label="Settings categories" className="flex overflow-x-auto border-b border-white/10 px-3 sm:px-8">
+        {groups.map(({ name, rows }, index) => (
+          <button key={name} onClick={() => { setActive(index); setFocused(rows[0].key); }} aria-pressed={active === index} className={`border-b-2 px-4 py-4 text-sm font-semibold ${active === index ? "border-brand-300 text-brand-300" : "border-transparent text-zinc-400 hover:text-white"}`}>{name}</button>
+        ))}
+      </nav>
+      <div className="mx-auto grid max-w-5xl gap-6 px-5 py-6 sm:p-8 md:grid-cols-[minmax(0,1fr)_250px]">
+        <div>
+          {group.rows.map(({ key, label }) => (
+            <label key={key} onFocus={() => setFocused(key)} onPointerEnter={() => setFocused(key)} className={`flex min-h-14 items-center justify-between gap-4 border-b border-white/10 px-3 text-sm focus-within:bg-white/5 ${current.key === key ? "bg-white/5 text-brand-300" : ""}`}>
+              <span>{label}</span>
+              {key === "volume" ? (
+                <span className="flex items-center gap-2"><input aria-label="Volume" type="range" min={0} max={100} value={value.volume} onChange={(event) => save({ ...value, volume: Number(event.target.value) })} className="w-24 accent-brand-300 sm:w-36" /><span className="w-10 text-right tabular-nums">{value.volume}%</span></span>
+              ) : key === "defaultSpeed" ? (
+                <select value={value.defaultSpeed} onChange={(event) => save({ ...value, defaultSpeed: Number(event.target.value) })} className="rounded-lg border border-white/15 bg-[#1d1929] px-3 py-2 text-sm">{[0.75, 1, 1.25, 1.5, 2].map((speed) => <option key={speed} value={speed}>{speed}×</option>)}</select>
+              ) : (
+                <input type="checkbox" checked={value.reducedMotion} onChange={(event) => save({ ...value, reducedMotion: event.target.checked })} className="size-5 accent-brand-300" />
+              )}
+            </label>
+          ))}
+          <button onClick={() => save({ ...DEFAULT_STUDIO_SETTINGS })} className="mt-5 inline-flex items-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-sm font-semibold hover:bg-white/10"><RotateCcw className="size-4" /> Restore defaults</button>
+        </div>
+        <aside aria-live="polite" className="self-start border-l border-white/10 px-4 py-2">
+          <h3 className="text-sm font-semibold">{current.label}</h3>
+          <p className="mt-1 text-sm leading-relaxed text-zinc-400">{current.help}</p>
+        </aside>
       </div>
-      <div className="flex justify-end">{children}</div>
-    </div>
-  );
-}
-
-function ToggleSwitch({ checked, onClick }: { checked: boolean; onClick: () => void }) {
-  return (
-    <button onClick={onClick} className={`w-12 h-6 rounded-full relative transition-colors ${checked ? "bg-brand-500" : "bg-gray-700"}`}>
-      <div className={`w-4 h-4 rounded-full bg-white absolute top-1 transition-all ${checked ? "left-7" : "left-1"}`} />
-    </button>
+    </section>
   );
 }
